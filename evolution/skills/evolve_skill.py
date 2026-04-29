@@ -28,6 +28,7 @@ from evolution.skills.skill_module import (
     load_skill,
     find_skill,
     reassemble_skill,
+    extract_evolved_skill_text,
 )
 
 console = Console()
@@ -119,7 +120,7 @@ def evolve(
     # ── 3. Validate constraints on baseline ─────────────────────────────
     console.print(f"\n[bold]Validating baseline constraints[/bold]")
     validator = ConstraintValidator(config)
-    baseline_constraints = validator.validate_all(skill["body"], "skill")
+    baseline_constraints = validator.validate_all(skill["raw"], "skill")
     all_pass = True
     for c in baseline_constraints:
         icon = "✓" if c.passed else "✗"
@@ -138,7 +139,7 @@ def evolve(
     console.print(f"  Eval model: {eval_model}")
 
     # Configure DSPy
-    lm = dspy.LM(eval_model)
+    lm = dspy.LM(eval_model, num_retries=8)
     dspy.configure(lm=lm)
 
     # Create the baseline skill module
@@ -156,7 +157,7 @@ def evolve(
     try:
         optimizer = dspy.GEPA(
             metric=skill_fitness_metric,
-            max_steps=iterations,
+            max_metric_calls=iterations,
         )
 
         optimized_module = optimizer.compile(
@@ -169,7 +170,8 @@ def evolve(
         console.print(f"[yellow]GEPA not available ({e}), falling back to MIPROv2[/yellow]")
         optimizer = dspy.MIPROv2(
             metric=skill_fitness_metric,
-            auto="light",
+            max_metric_calls=iterations,
+            num_threads=1,
         )
         optimized_module = optimizer.compile(
             baseline_module,
@@ -180,13 +182,13 @@ def evolve(
     console.print(f"\n  Optimization completed in {elapsed:.1f}s")
 
     # ── 6. Extract evolved skill text ───────────────────────────────────
-    # The optimized module's instructions contain the evolved skill text
-    evolved_body = optimized_module.skill_text
+    # Use sentinel-based extraction to avoid the --- separator bug
+    evolved_body = extract_evolved_skill_text(optimized_module)
     evolved_full = reassemble_skill(skill["frontmatter"], evolved_body)
 
     # ── 7. Validate evolved skill ───────────────────────────────────────
     console.print(f"\n[bold]Validating evolved skill[/bold]")
-    evolved_constraints = validator.validate_all(evolved_body, "skill", baseline_text=skill["body"])
+    evolved_constraints = validator.validate_all(evolved_full, "skill", baseline_text=skill["raw"])
     all_pass = True
     for c in evolved_constraints:
         icon = "✓" if c.passed else "✗"

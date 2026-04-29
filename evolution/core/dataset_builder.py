@@ -4,10 +4,15 @@ Sources:
 A) Synthetic generation — LLM reads a skill/tool/prompt and generates test cases
 B) SessionDB mining — extract real usage patterns and score with LLM-as-judge
 C) Golden sets — hand-curated JSONL files
+
+Fixes:
+- Robust JSON parsing with ast.literal_eval fallback for LLM-malformed output.
 """
 
+import ast
 import json
 import random
+import re
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional
@@ -86,6 +91,89 @@ class EvalDataset:
         ]
 
 
+def _try_parse_json_array(text: str) -> list:
+    """Robustly parse a JSON array from LLM output.
+
+    LLMs commonly return:
+    - Python dicts with single quotes: [{'key': 'value'}]
+    - Trailing commas: [1, 2, 3,]
+    - Markdown code fences: ```json [...]```
+    - Wrapped in prose text
+
+    Tries multiple strategies in order of preference.
+    """
+    # Strategy 1: Try direct JSON parse
+    try:
+        result = json.loads(text)
+        if isinstance(result, list):
+            return result
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # Strategy 2: Strip markdown code fences
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        # Remove opening fence (```json, ```JSON, etc.)
+        stripped = re.sub(r'^```[a-zA-Z]*\n?', '', stripped)
+        # Remove closing fence
+        stripped = re.sub(r'\n?```\s*$', '', stripped)
+        try:
+            result = json.loads(stripped)
+            if isinstance(result, list):
+                return result
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    # Strategy 3: Extract JSON array from surrounding text
+    match = re.search(r'\[.*\]', stripped, re.DOTALL)
+    if match:
+        candidate = match.group()
+
+        # 3a. Try direct parse of extracted array
+        try:
+            result = json.loads(candidate)
+            if isinstance(result, list):
+                return result
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+        # 3b. Fix trailing commas before closing brackets
+        fixed = re.sub(r',(\s*[\]}])', r'\1', candidate)
+        try:
+            result = json.loads(fixed)
+            if isinstance(result, list):
+                return result
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+        # 3c. Replace single quotes with double quotes for Python-style dicts
+        fixed2 = re.sub(r"(?P<key>[{,])\s*'([^']+)'\s*:", r'\1 "\2":', fixed)
+        fixed2 = re.sub(r":\s*'([^']*)'", lambda m: ': ' + json.dumps(m.group(1)), fixed2)
+        try:
+            result = json.loads(fixed2)
+            if isinstance(result, list):
+                return result
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+        # 3d. ast.literal_eval for Python-style list of dicts
+        try:
+            result = ast.literal_eval(fixed)
+            if isinstance(result, list):
+                return result
+        except (ValueError, SyntaxError):
+            pass
+
+        try:
+            result = ast.literal_eval(candidate)
+            if isinstance(result, list):
+                return result
+        except (ValueError, SyntaxError):
+            pass
+
+    raise ValueError(f"Could not parse test cases from LLM output: {text[:200]}")
+
+
 class SyntheticDatasetBuilder:
     """Generate evaluation datasets using a strong LLM.
 
@@ -133,16 +221,7 @@ class SyntheticDatasetBuilder:
             )
 
         # Parse the generated test cases
-        try:
-            cases_raw = json.loads(result.test_cases)
-        except json.JSONDecodeError:
-            # Try to extract JSON from the response
-            import re
-            match = re.search(r'\[.*\]', result.test_cases, re.DOTALL)
-            if match:
-                cases_raw = json.loads(match.group())
-            else:
-                raise ValueError(f"Could not parse test cases from LLM output: {result.test_cases[:200]}")
+        cases_raw = _try_parse_json_array(result.test_cases)
 
         examples = [
             EvalExample(
