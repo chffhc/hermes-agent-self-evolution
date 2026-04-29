@@ -1,9 +1,98 @@
-"""Configuration and hermes-agent repo discovery."""
+"""Configuration and hermes-agent repo discovery.
+
+Automatically discovers DashScope API credentials from ~/.hermes/.env
+to match the user's existing Hermes Agent configuration.
+"""
 
 import os
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional
+
+
+def _load_hermes_env() -> None:
+    """Load environment variables from ~/.hermes/.env if not already set.
+
+    This ensures the evolution pipeline reuses the same API key and base URL
+    as the user's existing Hermes Agent installation.
+    """
+    env_path = Path.home() / ".hermes" / ".env"
+    if not env_path.exists():
+        return
+
+    # Parse .env file (simple KEY=VALUE format)
+    with open(env_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip()
+            # Only set if not already in environment
+            if key not in os.environ:
+                os.environ[key] = value
+
+
+def get_api_key() -> str:
+    """Get the API key from environment or Hermes config."""
+    _load_hermes_env()
+
+    # Priority: DASHSCOPE_API_KEY > OPENAI_API_KEY
+    key = os.getenv("DASHSCOPE_API_KEY")
+    if key:
+        return key
+
+    key = os.getenv("OPENAI_API_KEY")
+    if key:
+        return key
+
+    raise EnvironmentError(
+        "No API key found. Set DASHSCOPE_API_KEY or OPENAI_API_KEY in "
+        "~/.hermes/.env or as environment variable."
+    )
+
+
+def get_api_base() -> str:
+    """Get the API base URL from environment or Hermes config."""
+    _load_hermes_env()
+
+    # Priority: DASHSCOPE_BASE_URL > OPENAI_API_BASE
+    base = os.getenv("DASHSCOPE_BASE_URL")
+    if base:
+        return base
+
+    base = os.getenv("OPENAI_API_BASE")
+    if base:
+        return base
+
+    # Default to DashScope compatible mode
+    return "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+
+def make_lm(model: str, **kwargs) -> "dspy.LM":
+    """Create a DSPy LM configured for DashScope / OpenAI-compatible API.
+
+    Args:
+        model: Model name (e.g., 'qwen3.6-plus', 'qwen-max').
+               DSPy's LM accepts the model name and uses the api_base/api_key
+               for routing. Using the 'openai/' prefix triggers OpenAI-compatible mode.
+
+    Returns:
+        Configured dspy.LM instance.
+    """
+    import dspy
+
+    # If model doesn't already have a provider prefix, use openai/ for compatibility
+    if "/" not in model:
+        model = f"openai/{model}"
+
+    return dspy.LM(
+        model=model,
+        api_base=get_api_base(),
+        api_key=get_api_key(),
+        **kwargs,
+    )
 
 
 @dataclass
@@ -17,10 +106,10 @@ class EvolutionConfig:
     iterations: int = 10
     population_size: int = 5
 
-    # LLM configuration
-    optimizer_model: str = "openai/gpt-4.1"  # Model for GEPA reflections
-    eval_model: str = "openai/gpt-4.1-mini"  # Model for LLM-as-judge scoring
-    judge_model: str = "openai/gpt-4.1"  # Model for dataset generation
+    # LLM configuration — defaults to DashScope qwen3.6-plus
+    optimizer_model: str = "qwen3.6-plus"  # Model for GEPA reflections
+    eval_model: str = "qwen3.6-plus"       # Model for LLM-as-judge scoring
+    judge_model: str = "qwen3.6-plus"      # Model for dataset generation
 
     # Constraints
     max_skill_size: int = 50_000  # 50KB default (evolved skills may include few-shot examples)

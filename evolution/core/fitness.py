@@ -9,7 +9,7 @@ import dspy
 from dataclasses import dataclass
 from typing import Optional
 
-from evolution.core.config import EvolutionConfig
+from evolution.core.config import EvolutionConfig, make_lm
 
 # GEPA trace type — use Optional to avoid import if DSPy changes it
 DSPyTrace = Optional[object]
@@ -76,7 +76,7 @@ class LLMJudge:
     ) -> FitnessScore:
         """Score an agent output using LLM-as-judge."""
 
-        lm = dspy.LM(self.config.eval_model, num_retries=8)
+        lm = make_lm(self.config.eval_model, num_retries=8)
 
         with dspy.context(lm=lm):
             result = self.judge(
