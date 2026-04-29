@@ -139,8 +139,11 @@ def evolve(
     console.print(f"  Eval model: {eval_model}")
 
     # Configure DSPy — uses DashScope credentials from ~/.hermes/.env
+    # Must use ChatAdapter (not JSONAdapter) because DashScope requires 'json'
+    # in the prompt to use response_format=json_object
+    from dspy.adapters import ChatAdapter
     lm = make_lm(eval_model, num_retries=8)
-    dspy.configure(lm=lm)
+    dspy.configure(lm=lm, adapter=ChatAdapter())
 
     # Create the baseline skill module
     baseline_module = SkillModule(skill["body"])
