@@ -162,9 +162,13 @@ def evolve(
     start_time = time.time()
 
     try:
+        # Create reflection LM for GEPA (can reuse eval model)
+        reflection_lm = make_lm(optimizer_model, num_retries=8, temperature=1.0)
+
         optimizer = dspy.GEPA(
             metric=skill_fitness_metric,
             max_metric_calls=iterations,
+            reflection_lm=reflection_lm,
         )
 
         optimized_module = optimizer.compile(
@@ -175,9 +179,11 @@ def evolve(
     except Exception as e:
         # Fall back to MIPROv2 if GEPA isn't available in this DSPy version
         console.print(f"[yellow]GEPA not available ({e}), falling back to MIPROv2[/yellow]")
+        # MIPROv2 uses 'auto' to control budget: light(~10), medium(~50), heavy(~200)
+        auto_budget = "light" if iterations <= 10 else ("medium" if iterations <= 50 else "heavy")
         optimizer = dspy.MIPROv2(
             metric=skill_fitness_metric,
-            max_metric_calls=iterations,
+            auto=auto_budget,
             num_threads=1,
         )
         optimized_module = optimizer.compile(
