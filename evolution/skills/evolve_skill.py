@@ -39,8 +39,8 @@ def evolve(
     iterations: int = 10,
     eval_source: str = "synthetic",
     dataset_path: Optional[str] = None,
-    optimizer_model: str = "openai/gpt-4.1",
-    eval_model: str = "openai/gpt-4.1-mini",
+    optimizer_model: str = "qwen3.6-plus",
+    eval_model: str = "qwen3.6-plus",
     hermes_repo: Optional[str] = None,
     run_tests: bool = False,
     dry_run: bool = False,
@@ -307,8 +307,8 @@ def evolve(
 @click.option("--eval-source", default="synthetic", type=click.Choice(["synthetic", "golden", "sessiondb"]),
               help="Source for evaluation dataset")
 @click.option("--dataset-path", default=None, help="Path to existing eval dataset (JSONL)")
-@click.option("--optimizer-model", default="openai/gpt-4.1", help="Model for GEPA reflections")
-@click.option("--eval-model", default="openai/gpt-4.1-mini", help="Model for evaluations")
+@click.option("--optimizer-model", default="qwen3.6-plus", help="Model for GEPA reflections")
+@click.option("--eval-model", default="qwen3.6-plus", help="Model for evaluations")
 @click.option("--hermes-repo", default=None, help="Path to hermes-agent repo")
 @click.option("--run-tests", is_flag=True, help="Run full pytest suite as constraint gate")
 @click.option("--dry-run", is_flag=True, help="Validate setup without running optimization")
