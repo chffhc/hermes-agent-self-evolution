@@ -71,6 +71,14 @@ def evolve(
     console.print(f"  Size: {len(skill['raw']):,} chars")
     console.print(f"  Description: {skill['description'][:80]}...")
 
+    # Configure DSPy EARLY — must be before any DSPy modules are used.
+    # DashScope requires ChatAdapter (not JSONAdapter) because it needs 'json'
+    # in the prompt to use response_format=json_object.
+    from dspy.adapters import ChatAdapter
+    lm = make_lm(eval_model, num_retries=8)
+    dspy.configure(lm=lm, adapter=ChatAdapter())
+    console.print(f"  DSPy configured: {eval_model} (ChatAdapter)")
+
     if dry_run:
         console.print(f"\n[bold green]DRY RUN — setup validated successfully.[/bold green]")
         console.print(f"  Would generate eval dataset (source: {eval_source})")
@@ -138,12 +146,8 @@ def evolve(
     console.print(f"  Optimizer model: {optimizer_model}")
     console.print(f"  Eval model: {eval_model}")
 
-    # Configure DSPy — uses DashScope credentials from ~/.hermes/.env
-    # Must use ChatAdapter (not JSONAdapter) because DashScope requires 'json'
-    # in the prompt to use response_format=json_object
-    from dspy.adapters import ChatAdapter
-    lm = make_lm(eval_model, num_retries=8)
-    dspy.configure(lm=lm, adapter=ChatAdapter())
+    # LM is already configured above; get reference for holdout eval
+    # (dspy.settings.get('lm') returns the configured LM)
 
     # Create the baseline skill module
     baseline_module = SkillModule(skill["body"])
@@ -217,15 +221,14 @@ def evolve(
     baseline_scores = []
     evolved_scores = []
     for ex in holdout_examples:
-        # Score baseline
-        with dspy.context(lm=lm):
-            baseline_pred = baseline_module(task_input=ex.task_input)
-            baseline_score = skill_fitness_metric(ex, baseline_pred)
-            baseline_scores.append(baseline_score)
+        # Score baseline and evolved on holdout
+        baseline_pred = baseline_module(task_input=ex.task_input)
+        baseline_score = skill_fitness_metric(ex, baseline_pred)
+        baseline_scores.append(baseline_score)
 
-            evolved_pred = optimized_module(task_input=ex.task_input)
-            evolved_score = skill_fitness_metric(ex, evolved_pred)
-            evolved_scores.append(evolved_score)
+        evolved_pred = optimized_module(task_input=ex.task_input)
+        evolved_score = skill_fitness_metric(ex, evolved_pred)
+        evolved_scores.append(evolved_score)
 
     avg_baseline = sum(baseline_scores) / max(1, len(baseline_scores))
     avg_evolved = sum(evolved_scores) / max(1, len(evolved_scores))

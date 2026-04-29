@@ -198,7 +198,10 @@ class SyntheticDatasetBuilder:
 
     def __init__(self, config: EvolutionConfig):
         self.config = config
+        # Use ChatAdapter to avoid DashScope JSON mode compatibility issues
+        from dspy.adapters import ChatAdapter
         self.generator = dspy.ChainOfThought(self.GenerateTestCases)
+        self._adapter = ChatAdapter()
 
     def generate(
         self,
