@@ -6,10 +6,12 @@ GEPA-compatible with 5-arg metric signature.
 """
 
 import dspy
+import hashlib
 from dataclasses import dataclass
 from typing import Optional
 
 from evolution.core.config import EvolutionConfig, make_lm
+from dspy.adapters import ChatAdapter
 
 # GEPA trace type — use Optional to avoid import if DSPy changes it
 DSPyTrace = Optional[object]
@@ -146,6 +148,57 @@ def skill_fitness_metric(
         score = 0.3 + (0.7 * overlap)
 
     return min(1.0, max(0.0, score))
+
+
+def make_llm_judge_metric(config: EvolutionConfig, skill_text: str) -> callable:
+    """Create a GEPA-compatible metric function that uses LLM-as-judge scoring.
+
+    Returns a closure that scores agent outputs using multi-dimensional rubric evaluation
+    (correctness, procedure following, conciseness) instead of simple keyword overlap.
+
+    Args:
+        config: Evolution configuration.
+        skill_text: The skill body text (used for procedure-following evaluation).
+
+    Returns:
+        A callable with GEPA's 5-arg signature returning a float 0-1 score.
+    """
+    judge = LLMJudge(config)
+    cache: dict[str, float] = {}
+
+    def metric(
+        example: dspy.Example,
+        prediction: dspy.Prediction,
+        trace: DSPyTrace = None,
+        pred_name: Optional[str] = None,
+        pred_trace: DSPyTrace = None,
+    ) -> float:
+        agent_output = getattr(prediction, "output", "") or ""
+        expected = getattr(example, "expected_behavior", "") or ""
+        task_input = getattr(example, "task_input", "") or ""
+
+        if not agent_output.strip():
+            return 0.0
+
+        # Cache key to avoid redundant API calls
+        cache_key = hashlib.md5(f"{task_input}:{expected}:{agent_output[:200]}".encode()).hexdigest()[:12]
+        if cache_key in cache:
+            return cache[cache_key]
+
+        score = judge.score(
+            task_input=task_input,
+            expected_behavior=expected,
+            agent_output=agent_output,
+            skill_text=skill_text,
+        )
+
+        result = score.composite
+        cache[cache_key] = result
+        return result
+
+    # Attach cache for inspection
+    metric._cache = cache  # type: ignore
+    return metric
 
 
 def _parse_score(value) -> float:

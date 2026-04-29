@@ -21,7 +21,7 @@ from rich.table import Table
 from evolution.core.config import EvolutionConfig, get_hermes_agent_path, make_lm
 from evolution.core.dataset_builder import SyntheticDatasetBuilder, EvalDataset, GoldenDatasetLoader
 from evolution.core.external_importers import build_dataset_from_external
-from evolution.core.fitness import skill_fitness_metric, LLMJudge, FitnessScore
+from evolution.core.fitness import skill_fitness_metric, LLMJudge, FitnessScore, make_llm_judge_metric
 from evolution.core.constraints import ConstraintValidator
 from evolution.skills.skill_module import (
     SkillModule,
@@ -165,8 +165,11 @@ def evolve(
         # Create reflection LM for GEPA (can reuse eval model)
         reflection_lm = make_lm(optimizer_model, num_retries=8, temperature=1.0)
 
+        # Use LLM-as-judge metric for meaningful fitness signal
+        judge_metric = make_llm_judge_metric(config, skill["body"])
+
         optimizer = dspy.GEPA(
-            metric=skill_fitness_metric,
+            metric=judge_metric,
             max_metric_calls=iterations,
             reflection_lm=reflection_lm,
         )
@@ -181,8 +184,12 @@ def evolve(
         console.print(f"[yellow]GEPA not available ({e}), falling back to MIPROv2[/yellow]")
         # MIPROv2 uses 'auto' to control budget: light(~10), medium(~50), heavy(~200)
         auto_budget = "light" if iterations <= 10 else ("medium" if iterations <= 50 else "heavy")
+
+        # Use LLM-as-judge metric for meaningful fitness signal
+        judge_metric = make_llm_judge_metric(config, skill["body"])
+
         optimizer = dspy.MIPROv2(
-            metric=skill_fitness_metric,
+            metric=judge_metric,
             auto=auto_budget,
             num_threads=1,
         )
@@ -221,20 +228,32 @@ def evolve(
 
     # ── 8. Evaluate on holdout set ──────────────────────────────────────
     console.print(f"\n[bold]Evaluating on holdout set ({len(dataset.holdout)} examples)[/bold]")
+    console.print(f"  Using LLM-as-judge (correctness + procedure + conciseness)")
 
     holdout_examples = dataset.to_dspy_examples("holdout")
+    holdout_judge = LLMJudge(config)
 
     baseline_scores = []
     evolved_scores = []
     for ex in holdout_examples:
-        # Score baseline and evolved on holdout
+        # Score baseline and evolved using LLM-as-judge
         baseline_pred = baseline_module(task_input=ex.task_input)
-        baseline_score = skill_fitness_metric(ex, baseline_pred)
-        baseline_scores.append(baseline_score)
+        baseline_score = holdout_judge.score(
+            task_input=ex.task_input,
+            expected_behavior=ex.expected_behavior,
+            agent_output=getattr(baseline_pred, "output", ""),
+            skill_text=skill["body"],
+        )
+        baseline_scores.append(baseline_score.composite)
 
         evolved_pred = optimized_module(task_input=ex.task_input)
-        evolved_score = skill_fitness_metric(ex, evolved_pred)
-        evolved_scores.append(evolved_score)
+        evolved_score = holdout_judge.score(
+            task_input=ex.task_input,
+            expected_behavior=ex.expected_behavior,
+            agent_output=getattr(evolved_pred, "output", ""),
+            skill_text=evolved_body,  # Use evolved skill text for evolved scoring
+        )
+        evolved_scores.append(evolved_score.composite)
 
     avg_baseline = sum(baseline_scores) / max(1, len(baseline_scores))
     avg_evolved = sum(evolved_scores) / max(1, len(evolved_scores))
