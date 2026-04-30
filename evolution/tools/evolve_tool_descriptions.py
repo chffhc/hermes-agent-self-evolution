@@ -554,9 +554,10 @@ def evolve_tool_descriptions(
     baseline_descriptions = {t.name: t.description for t in tools}
 
     # ── 5. Run GEPA optimization ────────────────────────────────────────
-    console.print(f"\n[bold cyan]Step 4: Running GEPA optimization ({iterations} iterations)[/bold cyan]\n")
+    console.print(f"\n[bold cyan]Step 5: Running GEPA optimization ({iterations} iterations)[/bold cyan]\n")
 
     start_time = time.time()
+    optimized_module = None
 
     try:
         reflection_lm = make_dashscope_lm(optimizer_model, num_retries=8, temperature=1.0)
@@ -569,27 +570,47 @@ def evolve_tool_descriptions(
             ).with_inputs("task")
             for ex in dataset.train
         ]
+        val_examples = [
+            dspy.Example(
+                task=ex.task_description,
+                correct_tool=ex.correct_tool,
+            ).with_inputs("task")
+            for ex in dataset.val
+        ]
 
         module = ToolDescriptionModule(tools)
 
         optimizer = dspy.GEPA(
             metric=tool_selection_fitness_metric,
-            max_metric_calls=iterations * 5,
             reflection_lm=reflection_lm,
         )
 
         optimized_module = optimizer.compile(
             module,
             trainset=train_examples,
+            valset=val_examples,
+            eval_kwargs={"max_calls": iterations * 5},
         )
 
         elapsed = time.time() - start_time
         console.print(f"\n  Optimization completed in {elapsed:.1f}s")
 
     except Exception as e:
-        console.print(f"[yellow]GEPA failed ({e}), descriptions remain at baseline[/yellow]")
+        # Fall back to MIPROv2 if GEPA isn't available
+        console.print(f"[yellow]GEPA not available ({e}), falling back to MIPROv2[/yellow]")
+        auto_budget = "light" if iterations <= 10 else ("medium" if iterations <= 50 else "heavy")
+
+        optimizer = dspy.MIPROv2(
+            metric=tool_selection_fitness_metric,
+            auto=auto_budget,
+            num_threads=1,
+        )
+        optimized_module = optimizer.compile(
+            module,
+            trainset=train_examples,
+            valset=val_examples,
+        )
         elapsed = time.time() - start_time
-        optimized_module = None
 
     # ── 6. Evaluate evolved accuracy ────────────────────────────────────
     console.print(f"\n[bold]Step 5: Evaluating evolved tool selection[/bold]")
