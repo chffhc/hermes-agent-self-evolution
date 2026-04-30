@@ -49,8 +49,10 @@ def make_dashscope_lm(model: str = "qwen3.6-plus", num_retries: int = 8, **kwarg
                 break
 
     if not api_key:
-        # Fallback: try OPENAI_API_KEY (some DashScope proxies use this)
-        api_key = os.getenv("OPENAI_API_KEY", "")
+        raise OSError(
+            "DASHSCOPE_API_KEY not found. Set it in ~/.hermes/.env or "
+            "export DASHSCOPE_API_KEY=sk-..."
+        )
 
     base_url = "https://coding.dashscope.aliyuncs.com/v1"
 
@@ -176,12 +178,8 @@ def evolve(
     console.print(f"  Optimizer model: {optimizer_model}")
     console.print(f"  Eval model: {eval_model}")
 
-    # Configure DSPy with DashScope LM — MUST use ChatAdapter for DashScope
-    from dspy.adapters import ChatAdapter
-
-    lm = make_dashscope_lm(eval_model, num_retries=8)
-    dspy.configure(lm=lm, adapter=ChatAdapter())
-    console.print(f"  DSPy configured: {eval_model} (ChatAdapter, DashScope)")
+    # DSPy was already configured at step 1 — no need to re-configure
+    console.print(f"  Using existing DSPy config from Step 1")
 
     # Create the baseline skill module
     baseline_module = SkillModule(skill["body"])
@@ -204,14 +202,15 @@ def evolve(
 
         optimizer = dspy.GEPA(
             metric=judge_metric,
-            max_metric_calls=iterations * 5,  # 5x evals per iteration for proper exploration
             reflection_lm=reflection_lm,
         )
 
+        # Control budget via compile() kwargs
         optimized_module = optimizer.compile(
             baseline_module,
             trainset=trainset,
             valset=valset,
+            eval_kwargs={"max_calls": iterations * 5},
         )
     except Exception as e:
         # Fall back to MIPROv2 if GEPA isn't available in this DSPy version
@@ -230,6 +229,7 @@ def evolve(
         optimized_module = optimizer.compile(
             baseline_module,
             trainset=trainset,
+            valset=valset,
         )
 
     elapsed = time.time() - start_time

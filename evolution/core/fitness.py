@@ -6,12 +6,10 @@ GEPA-compatible with 5-arg metric signature.
 """
 
 import dspy
-import hashlib
 from dataclasses import dataclass
 from typing import Optional
 
-from evolution.core.config import EvolutionConfig, make_lm
-from dspy.adapters import ChatAdapter
+from evolution.core.config import EvolutionConfig
 
 # GEPA trace type — use Optional to avoid import if DSPy changes it
 DSPyTrace = Optional[object]
@@ -94,7 +92,7 @@ class LLMJudge:
 
         # Length penalty
         length_penalty = 0.0
-        if artifact_size is not None and max_size is not None:
+        if artifact_size is not None and max_size is not None and max_size > 0:
             ratio = artifact_size / max_size
             if ratio > 0.9:
                 # Penalty ramps from 0 at 90% to 0.3 at 100%+

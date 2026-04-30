@@ -239,6 +239,7 @@ class SyntheticDatasetBuilder:
         ]
 
         # Shuffle and split
+        random.seed(42)
         random.shuffle(examples)
         n_total = len(examples)
         n_train = max(1, int(n_total * self.config.train_ratio))
@@ -271,6 +272,7 @@ class GoldenDatasetLoader:
                 if line.strip():
                     examples.append(EvalExample.from_dict(json.loads(line)))
 
+        random.seed(42)
         random.shuffle(examples)
         n = len(examples)
         n_train = max(1, int(n * 0.5))

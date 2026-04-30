@@ -5,11 +5,12 @@ to match the user's existing Hermes Agent configuration.
 """
 
 import os
+import functools
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Optional
 
 
+@functools.lru_cache(maxsize=1)
 def _load_hermes_env() -> None:
     """Load environment variables from ~/.hermes/.env if not already set.
 
@@ -47,7 +48,7 @@ def get_api_key() -> str:
     if key:
         return key
 
-    raise EnvironmentError(
+    raise OSError(
         "No API key found. Set DASHSCOPE_API_KEY or OPENAI_API_KEY in "
         "~/.hermes/.env or as environment variable."
     )

@@ -69,6 +69,7 @@ class ToolEvalDataset:
     def split(self, train_ratio: float = 0.6, val_ratio: float = 0.2):
         """Split examples into train/val/holdout."""
         import random
+        random.seed(42)
         random.shuffle(self.examples)
         n = len(self.examples)
         n_train = max(1, int(n * train_ratio))
@@ -516,8 +517,17 @@ def evolve_tool_descriptions(
         console.print(f"\n[bold green]DRY RUN — setup validated.[/bold green]")
         return
 
-    # ── 2. Build or load evaluation dataset ─────────────────────────────
-    console.print(f"\n[bold]Step 2: Building tool selection dataset[/bold]")
+    # ── 2. Configure DSPy first (MUST be before any ChainOfThought is created) ──
+    console.print(f"\n[bold]Step 2: Configuring DSPy[/bold]")
+    from dspy.adapters import ChatAdapter
+    from evolution.skills.evolve_skill import make_dashscope_lm
+
+    lm = make_dashscope_lm(eval_model, num_retries=8)
+    dspy.configure(lm=lm, adapter=ChatAdapter())
+    console.print(f"  DSPy configured: {eval_model} (ChatAdapter, DashScope)")
+
+    # ── 3. Build tool selection dataset ─────────────────────────────────
+    console.print(f"\n[bold]Step 3: Building tool selection dataset[/bold]")
 
     dataset_path_obj = Path(dataset_path) if dataset_path else Path("datasets/tools/tool_selection")
 
@@ -532,16 +542,9 @@ def evolve_tool_descriptions(
         console.print("[red]✗ No dataset examples generated[/red]")
         sys.exit(1)
 
-    # ── 3. Evaluate baseline accuracy ───────────────────────────────────
-    console.print(f"\n[bold]Step 3: Evaluating baseline tool selection[/bold]")
+    # ── 4. Evaluate baseline accuracy ───────────────────────────────────
+    console.print(f"\n[bold]Step 4: Evaluating baseline tool selection[/bold]")
     evaluator = ToolSelectionEvaluator(config)
-
-    # Configure DSPy
-    from dspy.adapters import ChatAdapter
-    from evolution.skills.evolve_skill import make_dashscope_lm
-
-    lm = make_dashscope_lm(eval_model, num_retries=8)
-    dspy.configure(lm=lm, adapter=ChatAdapter())
 
     baseline_accuracy, baseline_per_tool = evaluator.evaluate(tools, dataset.holdout)
     console.print(f"  Baseline accuracy: {baseline_accuracy:.1%} "

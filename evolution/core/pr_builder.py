@@ -157,15 +157,11 @@ class PRBuilder:
         pr_title = f"{title_prefix}: {' & '.join(change_names)} (score {metrics.baseline_score:.3f} → {metrics.evolved_score:.3f})"
 
         try:
-            pr_output = self._run_git(
-                [
-                    "pr", "create",
-                    "--title", pr_title,
-                    "--body", pr_body,
-                    "--base", "main",
-                ],
-                cwd=self.hermes_agent_path,
+            pr_output = subprocess.run(
+                ["gh", "pr", "create", "--title", pr_title, "--body", pr_body, "--base", "main"],
+                cwd=str(self.hermes_agent_path),
                 capture_output=True,
+                text=True,
             )
             if pr_output.returncode == 0:
                 pr_url = pr_output.stdout.strip()
@@ -176,8 +172,10 @@ class PRBuilder:
                     "gh pr create failed: %s", pr_output.stderr.strip()
                 )
                 pr_url = None
+        except FileNotFoundError:
+            # gh CLI not installed — branch is still created
+            pr_url = None
         except subprocess.CalledProcessError:
-            # gh CLI not available or not authenticated — branch is still created
             pr_url = None
 
         return PRResult(

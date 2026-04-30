@@ -105,6 +105,7 @@ class PromptEvalDataset:
 
     def split(self, train_ratio: float = 0.6, val_ratio: float = 0.2):
         import random
+        random.seed(42)
         random.shuffle(self.examples)
         n = len(self.examples)
         n_train = max(1, int(n * train_ratio))
@@ -452,8 +453,8 @@ def prompt_section_fitness_metric(
 ) -> float:
     """DSPy metric for prompt section optimization.
 
-    Evaluates how well the agent's behavior matches expectations.
-    Uses keyword overlap as a fast proxy.
+    Uses keyword overlap as a fast proxy, but without arbitrary floors.
+    Returns 0.0 for empty output, overlap-based score otherwise.
     """
     behavior = getattr(prediction, "behavior", "").lower()
     expected = getattr(example, "expected_behavior", "").lower()
@@ -461,13 +462,13 @@ def prompt_section_fitness_metric(
     if not behavior.strip():
         return 0.0
 
-    # Keyword overlap
+    # Keyword overlap — no floor bias
     expected_words = set(expected.split())
     behavior_words = set(behavior.split())
     if expected_words:
         overlap = len(expected_words & behavior_words) / len(expected_words)
-        return min(1.0, 0.3 + 0.7 * overlap)
-    return 0.5
+        return min(1.0, overlap)
+    return 0.0
 
 
 # ── Prompt section constraint validator ─────────────────────────────────
@@ -559,8 +560,17 @@ def evolve_prompt_section(
         console.print(f"\n[bold green]DRY RUN — setup validated.[/bold green]")
         return
 
-    # ── 2. Build or load behavioral test dataset ────────────────────────
-    console.print(f"\n[bold]Step 2: Building behavioral test dataset[/bold]")
+    # ── 2. Configure DSPy first (MUST be before any ChainOfThought is created) ──
+    console.print(f"\n[bold]Step 2: Configuring DSPy[/bold]")
+    from dspy.adapters import ChatAdapter
+    from evolution.skills.evolve_skill import make_dashscope_lm
+
+    lm = make_dashscope_lm(eval_model, num_retries=8)
+    dspy.configure(lm=lm, adapter=ChatAdapter())
+    console.print(f"  DSPy configured: {eval_model} (ChatAdapter, DashScope)")
+
+    # ── 3. Build behavioral test dataset ────────────────────────────────
+    console.print(f"\n[bold]Step 3: Building behavioral test dataset[/bold]")
 
     dataset_path_obj = Path(dataset_path) if dataset_path else Path("datasets/prompts/behavioral")
 
@@ -576,14 +586,8 @@ def evolve_prompt_section(
         console.print("[red]✗ No test examples generated[/red]")
         sys.exit(1)
 
-    # ── 3. Evaluate baseline behavior ───────────────────────────────────
-    console.print(f"\n[bold]Step 3: Evaluating baseline behavior[/bold]")
-
-    from dspy.adapters import ChatAdapter
-    from evolution.skills.evolve_skill import make_dashscope_lm
-
-    lm = make_dashscope_lm(eval_model, num_retries=8)
-    dspy.configure(lm=lm, adapter=ChatAdapter())
+    # ── 4. Evaluate baseline behavior ───────────────────────────────────
+    console.print(f"\n[bold]Step 4: Evaluating baseline behavior[/bold]")
 
     evaluator = BehavioralEvaluator(config)
     baseline_score, baseline_per_section = evaluator.evaluate(sections, dataset.holdout)

@@ -172,7 +172,6 @@ class BenchmarkGate:
 
         cmd = ["python", str(runner), "--tasks", str(task_count)]
         if skill_overrides:
-            # Write skill overrides to a temp file (unique per run to avoid races)
             import tempfile
             fd, override_path = tempfile.mkstemp(suffix=".json", prefix="skill_overrides_")
             try:
@@ -180,7 +179,11 @@ class BenchmarkGate:
                     f.write(json.dumps(skill_overrides))
                 cmd.extend(["--skill-overrides", override_path])
             except Exception:
-                os.close(fd)
+                # Only close if the with block didn't already consume it
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
                 raise
 
         try:

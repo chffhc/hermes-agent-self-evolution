@@ -120,33 +120,38 @@ class SkillModule(dspy.Module):
         return dspy.Prediction(output=result.output)
 
 
-def extract_evolved_skill_text(module: dspy.Module) -> str:
+def extract_evolved_skill_text(optimized_module: dspy.Module) -> str:
     """Extract the evolved skill body from a compiled DSPy module.
 
     Uses HTML comment sentinels to reliably locate the skill text within
-    the optimizer's instruction template, avoiding the bug where \\n\\n---\\n
-    split at the wrong separator and lost 89% of content.
+    the optimizer's instruction template, supporting both GEPA (extended_signature)
+    and MIPROv2/BootstrapFewShot (signature).
     """
-    predictor = module.predictor
+    predictor = getattr(optimized_module, "predictor", None)
     instruction = ""
 
-    # DSPy 3.x: ChainOfThought has .predict sub-module with .signature
-    if hasattr(predictor, 'predict') and hasattr(predictor.predict, 'signature'):
-        instruction = predictor.predict.signature.instructions or predictor.predict.signature.__doc__ or ""
-    elif hasattr(predictor, 'signature'):
-        instruction = predictor.signature.instructions or predictor.signature.__doc__ or ""
-    else:
-        # Fallback: search all sub-predictors
+    # Try extended_signature first (GEPA), then signature (MIPROv2/Bootstrap)
+    for sig_attr in ("extended_signature", "signature"):
+        sig = getattr(predictor, sig_attr, None) if predictor else None
+        if sig is None:
+            continue
+        instruction = getattr(sig, "instructions", None) or getattr(sig, "__doc__", "") or ""
+        if instruction:
+            break
+
+    # Fallback: search sub-predictors
+    if not instruction and predictor:
         for attr_name in dir(predictor):
             attr = getattr(predictor, attr_name, None)
-            if isinstance(attr, dspy.Predict) and hasattr(attr, 'signature'):
-                instruction = attr.signature.instructions or attr.signature.__doc__ or ""
+            if isinstance(attr, dspy.Predict) and hasattr(attr, "signature"):
+                instruction = getattr(attr.signature, "instructions", None) or getattr(attr.signature, "__doc__", "") or ""
                 if instruction:
                     break
 
     if not instruction:
         raise ValueError(
-            f"Cannot find instruction in predictor. Available attrs: {[a for a in dir(predictor) if not a.startswith('_')]}"
+            f"Cannot find instruction in optimized module predictor. "
+            f"Available attrs: {[a for a in dir(predictor) if not a.startswith('_')]}"
         )
 
     # Extract between sentinels
@@ -164,32 +169,5 @@ def extract_evolved_skill_text(module: dspy.Module) -> str:
 
 
 def reassemble_skill(frontmatter: str, evolved_body: str) -> str:
-    """Reassemble a skill file from frontmatter and evolved body.
-
-    Preserves the original YAML frontmatter (name, description, metadata)
-    and replaces only the body with the evolved version.
-    """
+    """Reassemble a skill file from frontmatter and evolved body."""
     return f"---\n{frontmatter}\n---\n\n{evolved_body}\n"
-
-
-def extract_evolved_skill_text(optimized_module: dspy.Module) -> str:
-    """Extract the evolved skill text from an optimized GEPA module.
-    
-    GEPA stores the evolved text in the module's predictor __doc__ attribute.
-    Falls back to skill_text attribute if __doc__ extraction fails.
-    """
-    # Try to get the evolved instruction from the predictor
-    try:
-        predictor = getattr(optimized_module, "predictor", None)
-        if predictor:
-            # GEPA stores evolved instructions in the signature's __doc__
-            sig = getattr(predictor, "extended_signature", None) or getattr(predictor, "signature", None)
-            if sig and hasattr(sig, "__doc__") and sig.__doc__:
-                text = sig.__doc__.strip()
-                if len(text) > 50:  # Sanity check
-                    return text
-    except Exception:
-        pass
-    
-    # Fallback: use skill_text attribute directly
-    return getattr(optimized_module, "skill_text", "")

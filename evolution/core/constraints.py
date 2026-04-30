@@ -93,7 +93,8 @@ class ConstraintValidator:
             )
 
     def _check_size(self, text: str, artifact_type: str) -> ConstraintResult:
-        size = len(text)
+        # Use byte count for accurate size measurement (multi-byte UTF-8)
+        size = len(text.encode("utf-8"))
         if artifact_type == "skill":
             limit = self.config.max_skill_size
         elif artifact_type == "tool_description":
