@@ -21,6 +21,7 @@ Usage:
 """
 
 import json
+import logging
 import os
 import sqlite3
 import sys
@@ -37,6 +38,45 @@ from evolution.core.config import get_hermes_agent_path
 from evolution.core.benchmark_gate import BenchmarkGate, BenchmarkResult
 
 console = Console()
+
+# ── Structured logging ───────────────────────────────────────────────────
+
+logger = logging.getLogger("hermes-self-evolution.monitor")
+
+
+def _setup_logging(log_file: Optional[Path] = None):
+    """Configure structured logging for continuous evolution.
+
+    Outputs to both console (via Rich handler) and a rotating log file.
+    """
+    if logger.handlers:
+        return  # Already configured
+
+    logger.setLevel(logging.DEBUG)
+
+    # Console handler — use Rich for colored output in terminal
+    from rich.logging import RichHandler
+    console_handler = RichHandler(
+        console=console,
+        show_time=True,
+        show_level=True,
+        rich_tracebacks=True,
+    )
+    console_handler.setLevel(logging.INFO)
+    logger.addHandler(console_handler)
+
+    # File handler — full debug log for post-hoc analysis
+    if log_file is None:
+        log_file = Path("evolution/monitor/evolution.log")
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    file_handler = logging.FileHandler(str(log_file), encoding="utf-8")
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    ))
+    logger.addHandler(file_handler)
+
+    logger.info("Continuous evolution logging initialized")
 
 
 # ── Performance metrics ─────────────────────────────────────────────────
@@ -152,7 +192,7 @@ class PerformanceMonitor:
         skill_metrics: dict[str, SkillMetric] = {}
 
         if not session_db_path.exists():
-            console.print(f"  ⚠ SessionDB not found at {session_db_path}")
+            logger.warning("SessionDB not found at %s", session_db_path)
             return skill_metrics
 
         try:
@@ -205,7 +245,7 @@ class PerformanceMonitor:
             conn.close()
 
         except Exception as e:
-            console.print(f"  ⚠ SessionDB scan failed: {e}")
+            logger.warning("SessionDB scan failed: %s", e)
 
         return skill_metrics
 
@@ -397,6 +437,9 @@ class ContinuousEvolution:
     3. Run optimization on top targets
     4. Validate with benchmarks
     5. Create PRs for improvements
+
+    Supports checkpoint/resume: if a cycle is interrupted, the next
+    run picks up where it left off.
     """
 
     def __init__(
@@ -404,20 +447,164 @@ class ContinuousEvolution:
         hermes_agent_path: Optional[Path] = None,
         max_targets: int = 3,
         benchmark_gate: bool = True,
+        optimize_iterations: int = 10,
+        optimizer_model: str = "qwen3.6-plus",
+        resume: bool = True,
     ):
         self.hermes_agent_path = hermes_agent_path or get_hermes_agent_path()
         self.max_targets = max_targets
         self.benchmark_gate = benchmark_gate
+        self.optimize_iterations = optimize_iterations
+        self.optimizer_model = optimizer_model
+        self.resume = resume
+        self.checkpoint_file = Path("evolution/monitor/checkpoint.json")
+
         self.monitor = PerformanceMonitor(self.hermes_agent_path)
         self.triage = AutoTriage()
         self.benchmarks = BenchmarkGate(hermes_agent_path=self.hermes_agent_path)
 
+        _setup_logging()
+
+    def _save_checkpoint(self, summary: dict, next_target_index: int, targets: list):
+        """Save progress checkpoint for resume after interruption."""
+        checkpoint = {
+            "timestamp": datetime.now().isoformat(),
+            "summary": summary,
+            "next_target_index": next_target_index,
+            "remaining_targets": [
+                {"type": t.target_type, "name": t.target_name, "priority": t.priority_score}
+                for t in targets[next_target_index:]
+            ],
+        }
+        self.checkpoint_file.parent.mkdir(parents=True, exist_ok=True)
+        self.checkpoint_file.write_text(json.dumps(checkpoint, indent=2, ensure_ascii=False))
+        logger.debug("Checkpoint saved: %d targets remaining", len(targets) - next_target_index)
+
+    def _load_checkpoint(self) -> Optional[dict]:
+        """Load interrupted checkpoint if available."""
+        if self.checkpoint_file.exists():
+            try:
+                data = json.loads(self.checkpoint_file.read_text())
+                # Only resume if checkpoint is < 24 hours old
+                ts = datetime.fromisoformat(data["timestamp"])
+                if (datetime.now() - ts) < timedelta(hours=24):
+                    logger.info("Resuming from checkpoint: %s", data["timestamp"])
+                    return data
+                else:
+                    logger.info("Checkpoint too old (%s), starting fresh", data["timestamp"])
+                    self.checkpoint_file.unlink()
+            except Exception:
+                logger.debug("Failed to load checkpoint, starting fresh")
+        return None
+
+    def _clear_checkpoint(self):
+        """Remove checkpoint after successful completion."""
+        if self.checkpoint_file.exists():
+            self.checkpoint_file.unlink()
+
+    def _optimize_target(self, target) -> dict:
+        """Dispatch optimization to the appropriate Phase 1/2/3 function.
+
+        Returns a dict with: success, improvement, output_dir, error.
+        """
+        result = {"success": False, "improvement": 0.0, "output_dir": "", "error": None}
+
+        if target.target_type == "skill":
+            try:
+                from evolution.skills.evolve_skill import evolve
+                logger.info("Optimizing skill: %s (%d iterations)", target.target_name, self.optimize_iterations)
+                evolve(
+                    skill_name=target.target_name,
+                    iterations=self.optimize_iterations,
+                    eval_source="synthetic",
+                    optimizer_model=self.optimizer_model,
+                    eval_model=self.optimizer_model,
+                    hermes_repo=str(self.hermes_agent_path),
+                    run_tests=False,
+                )
+                # Check output directory for the latest run
+                output_dir = Path("output") / target.target_name
+                if output_dir.exists():
+                    subdirs = sorted(output_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
+                    if subdirs:
+                        metrics_file = subdirs[0] / "metrics.json"
+                        if metrics_file.exists():
+                            metrics = json.loads(metrics_file.read_text())
+                            result["improvement"] = metrics.get("improvement", 0.0)
+                            result["output_dir"] = str(subdirs[0])
+                            result["success"] = metrics.get("improvement", 0.0) > 0
+                logger.info("Skill %s: improvement=%+.3f success=%s", target.target_name, result["improvement"], result["success"])
+            except Exception as e:
+                logger.error("Skill optimization failed for %s: %s", target.target_name, e)
+                result["error"] = str(e)
+
+        elif target.target_type == "tool":
+            try:
+                from evolution.tools.evolve_tool_descriptions import evolve_tool_descriptions
+                logger.info("Optimizing tool description: %s (%d iterations)", target.target_name, self.optimize_iterations)
+                evolve_tool_descriptions(
+                    iterations=self.optimize_iterations,
+                    optimizer_model=self.optimizer_model,
+                    eval_model=self.optimizer_model,
+                    hermes_repo=str(self.hermes_agent_path),
+                    tool_filter=[target.target_name],
+                )
+                output_dir = Path("output/tool_descriptions")
+                if output_dir.exists():
+                    subdirs = sorted(output_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
+                    if subdirs:
+                        mf = subdirs[0] / "metrics.json"
+                        if mf.exists():
+                            metrics = json.loads(mf.read_text())
+                            result["improvement"] = metrics.get("improvement", 0.0)
+                            result["output_dir"] = str(subdirs[0])
+                            result["success"] = metrics.get("improvement", 0.0) > 0
+                logger.info("Tool %s: improvement=%+.3f success=%s", target.target_name, result["improvement"], result["success"])
+            except Exception as e:
+                logger.error("Tool optimization failed for %s: %s", target.target_name, e)
+                result["error"] = str(e)
+
+        elif target.target_type == "prompt":
+            try:
+                from evolution.prompts.evolve_prompt_section import evolve_prompt_section
+                logger.info("Optimizing prompt section: %s (%d iterations)", target.target_name, self.optimize_iterations)
+                evolve_prompt_section(
+                    section_name=target.target_name,
+                    iterations=self.optimize_iterations,
+                    optimizer_model=self.optimizer_model,
+                    eval_model=self.optimizer_model,
+                    hermes_repo=str(self.hermes_agent_path),
+                )
+                output_dir = Path("output/prompt_sections")
+                if output_dir.exists():
+                    subdirs = sorted(output_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
+                    if subdirs:
+                        mf = subdirs[0] / "metrics.json"
+                        if mf.exists():
+                            metrics = json.loads(mf.read_text())
+                            result["improvement"] = metrics.get("improvement", 0.0)
+                            result["output_dir"] = str(subdirs[0])
+                            result["success"] = metrics.get("improvement", 0.0) > 0
+                logger.info("Prompt section %s: improvement=%+.3f success=%s", target.target_name, result["improvement"], result["success"])
+            except Exception as e:
+                logger.error("Prompt optimization failed for %s: %s", target.target_name, e)
+                result["error"] = str(e)
+
+        else:
+            logger.warning("Unknown target type: %s for %s", target.target_type, target.target_name)
+            result["error"] = f"Unknown target type: {target.target_type}"
+
+        return result
+
     def run_cycle(self, dry_run: bool = False) -> dict:
         """Run one full continuous improvement cycle.
 
+        Supports checkpoint/resume — if a previous cycle was interrupted,
+        this run picks up where it left off.
+
         Returns a summary of what was done.
         """
-        console.print(f"\n[bold cyan]🧬 Continuous Self-Improvement Cycle[/bold cyan]\n")
+        logger.info("=== Continuous Self-Improvement Cycle START ===")
         start = time.time()
         summary = {
             "timestamp": datetime.now().isoformat(),
@@ -426,76 +613,103 @@ class ContinuousEvolution:
             "prs_created": 0,
             "benchmarks_passed": True,
             "elapsed_seconds": 0,
+            "optimizations": [],
         }
 
+        # ── Resume from checkpoint if available ──────────────────────────
+        checkpoint = self._load_checkpoint() if self.resume else None
+        if checkpoint:
+            summary = checkpoint["summary"]
+            logger.info("Resumed: %d targets already optimized", summary["targets_optimized"])
+
         # ── Step 1: Scan metrics ────────────────────────────────────────
-        console.print("[bold]Step 1: Scanning performance metrics[/bold]")
+        logger.info("Step 1: Scanning performance metrics")
         skill_metrics = self.monitor.get_skill_metrics()
         tool_metrics = self.monitor.get_tool_metrics()
         benchmark_trends = self.monitor.get_benchmark_trends()
 
-        console.print(f"  Skills tracked: {len(skill_metrics)}")
-        console.print(f"  Tools tracked: {len(tool_metrics)}")
-        console.print(f"  Benchmark trends: {len(benchmark_trends)}")
+        logger.info("Skills tracked: %d, Tools tracked: %d, Benchmarks: %d",
+                     len(skill_metrics), len(tool_metrics), len(benchmark_trends))
 
         # ── Step 2: Triage ──────────────────────────────────────────────
-        console.print(f"\n[bold]Step 2: Identifying optimization targets[/bold]")
+        logger.info("Step 2: Identifying optimization targets")
         targets = self.triage.triage(skill_metrics, tool_metrics, benchmark_trends)
         summary["targets_found"] = len(targets)
 
-        if targets:
-            table = Table(title="Optimization Targets (ranked)")
-            table.add_column("Priority", justify="right")
-            table.add_column("Type")
-            table.add_column("Target")
-            table.add_column("Score")
-            table.add_column("Reason")
+        if not targets:
+            logger.info("No optimization targets found — all metrics look good")
+            summary["elapsed_seconds"] = time.time() - start
+            self._clear_checkpoint()
+            return summary
 
-            for t in targets[:self.max_targets]:
-                table.add_row(
-                    f"{t.priority_score:.2f}",
-                    t.target_type,
-                    t.target_name,
-                    f"{t.current_score:.3f}",
-                    t.reason,
-                )
-            console.print(table)
-        else:
-            console.print("  [green]✓ No optimization targets — all metrics look good![/green]")
+        targets = targets[:self.max_targets]
+        for t in targets:
+            logger.info("Target: %s/%s priority=%.2f score=%.3f reason=%s",
+                         t.target_type, t.target_name, t.priority_score, t.current_score, t.reason)
+
+        if dry_run:
+            logger.info("DRY RUN — would optimize %d targets", len(targets))
+            for t in targets:
+                logger.info("  → %s: %s", t.target_type, t.target_name)
             summary["elapsed_seconds"] = time.time() - start
             return summary
 
         # ── Step 3: Run benchmarks (gate) ───────────────────────────────
         if self.benchmark_gate:
-            console.print(f"\n[bold]Step 3: Running benchmark gate[/bold]")
-            # Run fast benchmarks to ensure no existing regressions
-            # In production, this would call the actual benchmark runner
-            console.print("  [yellow]⚠ Benchmark gate skipped (no hermes-agent benchmarks configured)[/yellow]")
+            logger.info("Step 3: Running benchmark gate")
+            # Try the fast benchmarks as a regression check
+            try:
+                fast_result = self.benchmarks.run_tblite_fast()
+                if fast_result.error:
+                    logger.warning("Benchmark gate skipped: %s", fast_result.error)
+                else:
+                    gate = self.benchmarks.check_gate([fast_result])
+                    summary["benchmarks_passed"] = gate.passed
+                    if not gate.passed:
+                        logger.warning("Benchmark gate FAILED: %s", gate.regressions)
+            except Exception as e:
+                logger.warning("Benchmark gate error (continuing anyway): %s", e)
 
         # ── Step 4: Optimize top targets ────────────────────────────────
-        console.print(f"\n[bold]Step 4: Optimizing top targets[/bold]")
+        logger.info("Step 4: Optimizing %d targets", len(targets))
 
-        if dry_run:
-            console.print("  [cyan]DRY RUN — would optimize:[/cyan]")
-            for t in targets[:self.max_targets]:
-                console.print(f"    → {t.target_type}: {t.target_name}")
-            summary["elapsed_seconds"] = time.time() - start
-            return summary
+        target_results = []
+        start_index = checkpoint["next_target_index"] if checkpoint else 0
 
-        # In production, this would call the appropriate evolve function
-        # For now, we log what would be done
-        for t in targets[:self.max_targets]:
-            console.print(f"  → Would optimize {t.target_type}: {t.target_name}")
-            console.print(f"    Reason: {t.reason}")
-            console.print(f"    Expected improvement: {t.estimated_improvement:.1%}")
-            summary["targets_optimized"] += 1
+        for i, target in enumerate(targets):
+            if i < start_index:
+                logger.info("Skipping already-optimized target: %s/%s", target.target_type, target.target_name)
+                continue
+
+            logger.info("Optimizing target %d/%d: %s/%s", i + 1, len(targets), target.target_type, target.target_name)
+
+            result = self._optimize_target(target)
+            target_results.append(result)
+            summary["optimizations"].append({
+                "type": target.target_type,
+                "name": target.target_name,
+                "improvement": result["improvement"],
+                "success": result["success"],
+                "output_dir": result["output_dir"],
+                "error": result["error"],
+            })
+
+            if result["success"]:
+                summary["targets_optimized"] += 1
+            else:
+                logger.warning("Optimization did not improve %s/%s: %s",
+                               target.target_type, target.target_name, result.get("error", "no improvement"))
+
+            # Save checkpoint after each target
+            self._save_checkpoint(summary, i + 1, targets)
 
         # ── Step 5: Report ──────────────────────────────────────────────
         summary["elapsed_seconds"] = time.time() - start
-        console.print(f"\n[bold]Cycle complete in {summary['elapsed_seconds']:.1f}s[/bold]")
-        console.print(f"  Targets found: {summary['targets_found']}")
-        console.print(f"  Targets optimized: {summary['targets_optimized']}")
-        console.print(f"  PRs created: {summary['prs_created']}")
+        self._clear_checkpoint()
+
+        logger.info("=== Cycle complete in %.1fs ===", summary["elapsed_seconds"])
+        logger.info("Targets found: %d, optimized: %d, PRs created: %d",
+                     summary["targets_found"], summary["targets_optimized"], summary["prs_created"])
 
         return summary
 
@@ -542,6 +756,10 @@ def main():
     parser.add_argument("--setup-cron", action="store_true", help="Set up cron jobs")
     parser.add_argument("--dry-run", action="store_true", help="Show what would be done")
     parser.add_argument("--hermes-repo", default=None, help="Path to hermes-agent repo")
+    parser.add_argument("--iterations", default=10, type=int, help="Iterations per target (default: 10)")
+    parser.add_argument("--model", default="qwen3.6-plus", help="Optimizer model")
+    parser.add_argument("--max-targets", default=3, type=int, help="Max targets per cycle")
+    parser.add_argument("--no-resume", action="store_true", help="Skip checkpoint resume")
 
     args = parser.parse_args()
 
@@ -552,6 +770,10 @@ def main():
     if args.cycle:
         evolution = ContinuousEvolution(
             hermes_agent_path=Path(args.hermes_repo) if args.hermes_repo else None,
+            max_targets=args.max_targets,
+            optimize_iterations=args.iterations,
+            optimizer_model=args.model,
+            resume=not args.no_resume,
         )
         result = evolution.run_cycle(dry_run=args.dry_run)
         print(json.dumps(result, indent=2))
