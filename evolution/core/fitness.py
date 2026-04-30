@@ -2,13 +2,19 @@
 
 Uses LLM-as-judge with rubrics to score agent outputs.
 Supports length penalties and multi-dimensional scoring.
+GEPA-compatible with 5-arg metric signature.
 """
 
 import dspy
+import hashlib
 from dataclasses import dataclass
 from typing import Optional
 
-from evolution.core.config import EvolutionConfig
+from evolution.core.config import EvolutionConfig, make_lm
+from dspy.adapters import ChatAdapter
+
+# GEPA trace type — use Optional to avoid import if DSPy changes it
+DSPyTrace = Optional[object]
 
 
 @dataclass
@@ -103,10 +109,18 @@ class LLMJudge:
         )
 
 
-def skill_fitness_metric(example: dspy.Example, prediction: dspy.Prediction, trace=None) -> float:
+def skill_fitness_metric(
+    example: dspy.Example,
+    prediction: dspy.Prediction,
+    trace: DSPyTrace = None,
+    pred_name: Optional[str] = None,
+    pred_trace: DSPyTrace = None,
+) -> float:
     """DSPy-compatible metric function for skill optimization.
 
-    This is what gets passed to dspy.GEPA(metric=...).
+    GEPA-compatible 5-arg signature. Called by GEPA with pred_name and pred_trace
+    during per-predictor optimization, and without them for program-level scoring.
+
     Returns a float 0-1 score.
     """
     # The prediction should have an 'output' field with the agent's response

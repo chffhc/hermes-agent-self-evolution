@@ -20,7 +20,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from evolution.core.config import EvolutionConfig, get_hermes_agent_path
+from evolution.core.config import EvolutionConfig, get_hermes_agent_path, make_lm
 from evolution.core.dataset_builder import SyntheticDatasetBuilder, EvalDataset, GoldenDatasetLoader
 from evolution.core.external_importers import build_dataset_from_external
 from evolution.core.fitness import skill_fitness_metric, LLMJudge, FitnessScore, make_llm_judge_metric
@@ -100,6 +100,14 @@ def evolve(
     console.print(f"  Name: {skill['name']}")
     console.print(f"  Size: {len(skill['raw']):,} chars")
     console.print(f"  Description: {skill['description'][:80]}...")
+
+    # Configure DSPy EARLY — must be before any DSPy modules are used.
+    # DashScope requires ChatAdapter (not JSONAdapter) because it needs 'json'
+    # in the prompt to use response_format=json_object.
+    from dspy.adapters import ChatAdapter
+    lm = make_lm(eval_model, num_retries=8)
+    dspy.configure(lm=lm, adapter=ChatAdapter())
+    console.print(f"  DSPy configured: {eval_model} (ChatAdapter)")
 
     if dry_run:
         console.print(f"\n[bold green]DRY RUN — setup validated successfully.[/bold green]")

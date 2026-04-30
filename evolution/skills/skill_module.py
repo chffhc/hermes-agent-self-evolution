@@ -3,6 +3,11 @@
 The key abstraction: a skill file becomes a parameterized DSPy module
 where the skill text is the optimizable parameter. GEPA can then
 mutate the skill text and evaluate the results.
+
+Fixes:
+- Skill text embedded in instruction template (not as input field) so
+  GEPA/MIPROv2 can actually mutate it.
+- HTML comment sentinel for clean extraction of evolved skill body.
 """
 
 import re
@@ -10,6 +15,10 @@ from pathlib import Path
 from typing import Optional
 
 import dspy
+
+# Sentinel that cannot appear in markdown content
+_SENTINEL_START = "<!-- __SKILL_EVOLVED_START__ -->"
+_SENTINEL_END = "<!-- __SKILL_EVOLVED_END__ -->"
 
 
 def load_skill(skill_path: Path) -> dict:
@@ -84,34 +93,74 @@ def find_skill(skill_name: str, hermes_agent_path: Path) -> Optional[Path]:
 class SkillModule(dspy.Module):
     """A DSPy module that wraps a skill file for optimization.
 
-    The skill text (body) is the parameter that GEPA optimizes.
-    On each forward pass, the module:
-    1. Uses the skill text as instructions
-    2. Processes the task input
-    3. Returns the agent's response
+    The skill text (body) is the parameter that GEPA/MIPROv2 optimizes.
+    Unlike the original implementation which passed skill text as an input
+    field (making it unoptimizable), this version embeds it in the
+    instruction template of a dynamically-created Signature, allowing
+    the optimizer to propose improved skill bodies.
     """
-
-    class TaskWithSkill(dspy.Signature):
-        """Complete a task following the provided skill instructions.
-
-        You are an AI agent following specific skill instructions to complete a task.
-        Read the skill instructions carefully and follow the procedure described.
-        """
-        skill_instructions: str = dspy.InputField(desc="The skill instructions to follow")
-        task_input: str = dspy.InputField(desc="The task to complete")
-        output: str = dspy.OutputField(desc="Your response following the skill instructions")
 
     def __init__(self, skill_text: str):
         super().__init__()
-        self.skill_text = skill_text
-        self.predictor = dspy.ChainOfThought(self.TaskWithSkill)
+        # Dynamically create a Signature with the skill text as its instruction.
+        # This makes the skill text an optimizable parameter rather than a static input.
+        class TaskWithSkill(dspy.Signature):
+            __doc__ = (
+                "You are an AI agent following specific skill instructions to complete a task.\n"
+                "Read the skill instructions carefully and follow the procedure described.\n\n"
+                f"{_SENTINEL_START}\n{skill_text}\n{_SENTINEL_END}"
+            )
+            task_input: str = dspy.InputField(desc="The task to complete")
+            output: str = dspy.OutputField(desc="Your response following the skill instructions")
+
+        self.predictor = dspy.ChainOfThought(TaskWithSkill)
 
     def forward(self, task_input: str) -> dspy.Prediction:
-        result = self.predictor(
-            skill_instructions=self.skill_text,
-            task_input=task_input,
-        )
+        result = self.predictor(task_input=task_input)
         return dspy.Prediction(output=result.output)
+
+
+def extract_evolved_skill_text(module: dspy.Module) -> str:
+    """Extract the evolved skill body from a compiled DSPy module.
+
+    Uses HTML comment sentinels to reliably locate the skill text within
+    the optimizer's instruction template, avoiding the bug where \\n\\n---\\n
+    split at the wrong separator and lost 89% of content.
+    """
+    predictor = module.predictor
+    instruction = ""
+
+    # DSPy 3.x: ChainOfThought has .predict sub-module with .signature
+    if hasattr(predictor, 'predict') and hasattr(predictor.predict, 'signature'):
+        instruction = predictor.predict.signature.instructions or predictor.predict.signature.__doc__ or ""
+    elif hasattr(predictor, 'signature'):
+        instruction = predictor.signature.instructions or predictor.signature.__doc__ or ""
+    else:
+        # Fallback: search all sub-predictors
+        for attr_name in dir(predictor):
+            attr = getattr(predictor, attr_name, None)
+            if isinstance(attr, dspy.Predict) and hasattr(attr, 'signature'):
+                instruction = attr.signature.instructions or attr.signature.__doc__ or ""
+                if instruction:
+                    break
+
+    if not instruction:
+        raise ValueError(
+            f"Cannot find instruction in predictor. Available attrs: {[a for a in dir(predictor) if not a.startswith('_')]}"
+        )
+
+    # Extract between sentinels
+    start_idx = instruction.find(_SENTINEL_START)
+    end_idx = instruction.find(_SENTINEL_END)
+
+    if start_idx == -1 or end_idx == -1:
+        raise ValueError(
+            f"Cannot find skill text sentinels in evolved instruction. "
+            f"Instruction preview: {instruction[:300]}"
+        )
+
+    evolved_body = instruction[start_idx + len(_SENTINEL_START):end_idx].strip()
+    return evolved_body
 
 
 def reassemble_skill(frontmatter: str, evolved_body: str) -> str:
