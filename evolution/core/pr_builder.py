@@ -111,9 +111,17 @@ class PRBuilder:
         # Apply changes
         files_changed = []
         for change in changes:
-            target_path = self.hermes_agent_path / change.file_path
+            target_path = (self.hermes_agent_path / change.file_path).resolve()
+            # Path traversal guard: ensure target stays within hermes-agent repo
+            repo_resolved = self.hermes_agent_path.resolve()
+            if not target_path.is_relative_to(repo_resolved):
+                return PRResult(
+                    success=False,
+                    branch_name=branch_name,
+                    error=f"Path traversal detected: {change.file_path} escapes repo directory",
+                )
             target_path.parent.mkdir(parents=True, exist_ok=True)
-            target_path.write_text(change.evolved_content)
+            target_path.write_text(change.evolved_content, encoding="utf-8")
             files_changed.append(change.file_path)
 
         # Generate diff summary
@@ -159,7 +167,15 @@ class PRBuilder:
                 cwd=self.hermes_agent_path,
                 capture_output=True,
             )
-            pr_url = pr_output.stdout.strip()
+            if pr_output.returncode == 0:
+                pr_url = pr_output.stdout.strip()
+            else:
+                # gh CLI failed — branch is still created, log the error
+                import logging
+                logging.getLogger(__name__).warning(
+                    "gh pr create failed: %s", pr_output.stderr.strip()
+                )
+                pr_url = None
         except subprocess.CalledProcessError:
             # gh CLI not available or not authenticated — branch is still created
             pr_url = None
@@ -301,11 +317,16 @@ def _extract_change_names(changes: list[PRChange]) -> list[str]:
         # Try to get the name from the file path
         path = Path(change.file_path)
         if "skills" in change.file_path:
-            # skills/category/name/SKILL.md -> name
+            # skills/category/name/SKILL.md -> name (second dir after "skills")
+            # or skills/name/SKILL.md -> name (first dir after "skills")
             parts = path.parts
             for i, part in enumerate(parts):
-                if part == "skills" and i + 1 < len(parts):
-                    names.append(parts[i + 1])
+                if part == "skills":
+                    # If the path has SKILL.md as the filename, get the parent dir
+                    if path.name == "SKILL.md" and path.parent.name:
+                        names.append(path.parent.name)
+                    elif i + 1 < len(parts):
+                        names.append(parts[i + 1])
                     break
         elif "tools" in change.file_path:
             names.append(path.stem)
@@ -344,9 +365,9 @@ def create_pr_from_output(
         baseline_content = baseline_file.read_text()
 
     # Determine the file path in hermes-agent
-    # This needs to be provided or inferred — default to skills/
+    # Inferred from output directory structure: output/{skill_name}/timestamp/
     skill_name = output_dir.parent.name
-    file_path = f"skills/{change_type}/{skill_name}/SKILL.md"
+    file_path = f"skills/{skill_name}/SKILL.md"
 
     changes = [
         PRChange(

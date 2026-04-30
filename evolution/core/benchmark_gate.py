@@ -66,7 +66,15 @@ class BenchmarkGate:
     def _load_baselines(self) -> dict[str, float]:
         """Load stored baseline scores."""
         if self.baseline_file.exists():
-            return json.loads(self.baseline_file.read_text())
+            try:
+                return json.loads(self.baseline_file.read_text())
+            except (json.JSONDecodeError, OSError) as e:
+                # Corrupted baseline — start fresh
+                import logging
+                logging.getLogger(__name__).warning(
+                    "Failed to load baselines from %s: %s — starting fresh",
+                    self.baseline_file, e,
+                )
         return {}
 
     def save_baselines(self):
@@ -164,11 +172,16 @@ class BenchmarkGate:
 
         cmd = ["python", str(runner), "--tasks", str(task_count)]
         if skill_overrides:
-            # Write skill overrides to a temp file
-            override_file = Path("benchmarks/_skill_overrides.json")
-            override_file.parent.mkdir(parents=True, exist_ok=True)
-            override_file.write_text(json.dumps(skill_overrides))
-            cmd.extend(["--skill-overrides", str(override_file)])
+            # Write skill overrides to a temp file (unique per run to avoid races)
+            import tempfile
+            fd, override_path = tempfile.mkstemp(suffix=".json", prefix="skill_overrides_")
+            try:
+                with os.fdopen(fd, "w") as f:
+                    f.write(json.dumps(skill_overrides))
+                cmd.extend(["--skill-overrides", override_path])
+            except Exception:
+                os.close(fd)
+                raise
 
         try:
             proc = subprocess.run(
@@ -215,7 +228,7 @@ class BenchmarkGate:
             results: List of benchmark results to check
             max_regression: Override default max regression threshold
         """
-        threshold = max_regression or self.max_regression
+        threshold = max_regression if max_regression is not None else self.max_regression
         regressions = []
 
         for r in results:

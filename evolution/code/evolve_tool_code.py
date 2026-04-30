@@ -186,29 +186,42 @@ def evaluate_code_fitness(
     - pytest results (hard gate — must pass 100%)
     - Bug reproduction resolution (did the mutation fix the bug?)
     - Code quality heuristics
+
+    Returns a normalized score in [0, 1] using fixed-weight averaging
+    so scores are comparable across runs with/without bug reproduction.
     """
+    import tempfile
+
     scores = {}
+    weights = {"tests": 0.5, "bug_fix": 0.3, "code_quality": 0.2}
 
     # 1. Run tests
     tests_passed, test_output = run_pytest_for_tool(tool_name, hermes_agent_path)
     scores["tests"] = 1.0 if tests_passed else 0.0
 
-    # 2. Bug reproduction
+    # 2. Bug reproduction — write script to tempfile, not -c (arbitrary code risk)
     if bug_repro:
         try:
-            # Run the reproduction script
-            result = subprocess.run(
-                [sys.executable, "-c", bug_repro.reproduction_script],
-                cwd=str(hermes_agent_path),
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-            # Bug is fixed if the script no longer triggers the error
-            bug_fixed = result.returncode == 0
-            scores["bug_fix"] = 1.0 if bug_fixed else 0.0
+            fd, script_path = tempfile.mkstemp(suffix="_repro.py", prefix="bug_")
+            try:
+                with os.fdopen(fd, "w") as f:
+                    f.write(bug_repro.reproduction_script)
+                result = subprocess.run(
+                    [sys.executable, script_path],
+                    cwd=str(hermes_agent_path),
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+                bug_fixed = result.returncode == 0
+                scores["bug_fix"] = 1.0 if bug_fixed else 0.0
+            finally:
+                os.unlink(script_path)
         except Exception:
             scores["bug_fix"] = 0.0
+    else:
+        # When no bug repro, use default weight for code_quality
+        scores["bug_fix"] = 0.0  # Neutral — no bug to fix
 
     # 3. Code quality heuristics
     # Check that the file still has proper structure
@@ -237,9 +250,8 @@ def evaluate_code_fitness(
     else:
         scores["code_quality"] = 0.0
 
-    # Composite score
-    composite = sum(scores.values()) / len(scores)
-
+    # Fixed-weight composite — always divides by same weights sum (1.0)
+    composite = sum(scores[k] * weights[k] for k in weights)
     return composite, scores
 
 

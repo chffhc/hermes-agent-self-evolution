@@ -206,7 +206,8 @@ def _extract_constant(file_path: Path, name: str) -> Optional[str]:
     import re
     # Pattern: NAME = (\n    "..." \n    "..." \n)
     # or: NAME = "..."
-    pattern = rf'^{name}\s*=\s*\(([\s\S]*?)\)\s*$'
+    safe_name = re.escape(name)
+    pattern = rf'^{safe_name}\s*=\s*\(([\s\S]*?)\)\s*$'
     match = re.search(pattern, source, re.MULTILINE)
 
     if match:
@@ -217,7 +218,7 @@ def _extract_constant(file_path: Path, name: str) -> Optional[str]:
         return "\n".join(p for p in parts if p.strip())
 
     # Try simple string: NAME = "..."
-    pattern2 = rf'^{name}\s*=\s*"""([\s\S]*?)"""'
+    pattern2 = rf'^{safe_name}\s*=\s*"""([\s\S]*?)"""'
     match2 = re.search(pattern2, source, re.MULTILINE)
     if match2:
         return match2.group(1).strip()
@@ -371,8 +372,8 @@ class BehavioralEvaluator:
             )
             per_section_counts[ex.section_name] = per_section_counts.get(ex.section_name, 0) + 1
 
-        n = len(examples)
-        overall = total_score / max(1, n)
+        n_evaluated = len([ex for ex in examples if ex.section_name in section_map])
+        overall = total_score / max(1, n_evaluated)
         per_section_avg = {
             name: per_section_scores[name] / per_section_counts[name]
             for name in per_section_counts
@@ -388,14 +389,15 @@ class BehavioralEvaluator:
     ) -> float:
         """Evaluate a single scenario with a section.
 
-        Uses a proxy: check if the section content clearly addresses
-        the types of situations in the scenario.
+        Proxy evaluation: assesses how well the section instructions address
+        the scenario type. In production, replace with actual agent execution
+        through batch_runner for real behavioral scoring.
         """
         try:
             result = self.judge(
                 scenario=scenario,
                 system_prompt_section=section_content[:1000],
-                agent_behavior=section_content[:1000],  # Proxy: the instructions themselves
+                agent_behavior=f"Section instructions: {section_content[:500]}",
                 expected_behavior=expected,
             )
             score = float(result.score)
