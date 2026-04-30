@@ -19,6 +19,10 @@ datasets/**/*.json
 snapshots/
 *.pkl
 
+# Local run artifacts
+output/
+run_evolution.py
+
 # IDE
 .idea/
 .vscode/

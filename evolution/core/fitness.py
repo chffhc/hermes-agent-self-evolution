@@ -72,15 +72,14 @@ class LLMJudge:
     ) -> FitnessScore:
         """Score an agent output using LLM-as-judge."""
 
-        lm = dspy.LM(self.config.eval_model)
-
-        with dspy.context(lm=lm):
-            result = self.judge(
-                task_input=task_input,
-                expected_behavior=expected_behavior,
-                agent_output=agent_output,
-                skill_text=skill_text,
-            )
+        # Use the globally configured LM instead of creating a new one
+        # This ensures DashScope config is inherited
+        result = self.judge(
+            task_input=task_input,
+            expected_behavior=expected_behavior,
+            agent_output=agent_output,
+            skill_text=skill_text,
+        )
 
         # Parse scores (clamp to 0-1)
         correctness = _parse_score(result.correctness)
@@ -134,6 +133,35 @@ def skill_fitness_metric(example: dspy.Example, prediction: dspy.Prediction, tra
         score = 0.3 + (0.7 * overlap)
 
     return min(1.0, max(0.0, score))
+
+
+def make_llm_judge_metric(config: EvolutionConfig, skill_text: str):
+    """Create a DSPy-compatible metric function using LLM-as-judge.
+    
+    Returns a function compatible with GEPA's 5-parameter signature:
+    (gold, pred, trace, pred_name, pred_trace) -> float
+    
+    Also works with 3-param signature for MIPROv2 fallback.
+    """
+    judge = LLMJudge(config)
+    
+    def metric_fn(example, prediction, trace=None, pred_name=None, pred_trace=None) -> float:
+        task_input = getattr(example, "task_input", "") or ""
+        expected_behavior = getattr(example, "expected_behavior", "") or ""
+        agent_output = getattr(prediction, "output", "") or ""
+        
+        if not agent_output.strip():
+            return 0.0
+        
+        score = judge.score(
+            task_input=task_input,
+            expected_behavior=expected_behavior,
+            agent_output=agent_output,
+            skill_text=skill_text,
+        )
+        return score.composite
+    
+    return metric_fn
 
 
 def _parse_score(value) -> float:

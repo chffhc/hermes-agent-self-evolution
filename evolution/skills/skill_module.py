@@ -121,3 +121,26 @@ def reassemble_skill(frontmatter: str, evolved_body: str) -> str:
     and replaces only the body with the evolved version.
     """
     return f"---\n{frontmatter}\n---\n\n{evolved_body}\n"
+
+
+def extract_evolved_skill_text(optimized_module: dspy.Module) -> str:
+    """Extract the evolved skill text from an optimized GEPA module.
+    
+    GEPA stores the evolved text in the module's predictor __doc__ attribute.
+    Falls back to skill_text attribute if __doc__ extraction fails.
+    """
+    # Try to get the evolved instruction from the predictor
+    try:
+        predictor = getattr(optimized_module, "predictor", None)
+        if predictor:
+            # GEPA stores evolved instructions in the signature's __doc__
+            sig = getattr(predictor, "extended_signature", None) or getattr(predictor, "signature", None)
+            if sig and hasattr(sig, "__doc__") and sig.__doc__:
+                text = sig.__doc__.strip()
+                if len(text) > 50:  # Sanity check
+                    return text
+    except Exception:
+        pass
+    
+    # Fallback: use skill_text attribute directly
+    return getattr(optimized_module, "skill_text", "")

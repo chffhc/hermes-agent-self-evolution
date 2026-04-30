@@ -47,6 +47,23 @@ python -m evolution.skills.evolve_skill \
     --skill github-code-review \
     --iterations 10 \
     --eval-source sessiondb
+
+# Phase 2: Evolve tool descriptions
+python -m evolution.tools.evolve_tool_descriptions \
+    --iterations 10
+
+# Phase 3: Evolve a system prompt section
+python -m evolution.prompts.evolve_prompt_section \
+    --section MEMORY_GUIDANCE \
+    --iterations 10
+
+# Phase 4: Evolve tool code (uses Darwinian Evolver CLI)
+python -m evolution.code.evolve_tool_code \
+    --tool file_tools \
+    --iterations 10
+
+# Phase 5: Continuous improvement cycle
+python -m evolution.monitor.continuous_evolution --cycle
 ```
 
 ## What It Optimizes
@@ -54,10 +71,10 @@ python -m evolution.skills.evolve_skill \
 | Phase | Target | Engine | Status |
 |-------|--------|--------|--------|
 | **Phase 1** | Skill files (SKILL.md) | DSPy + GEPA | ✅ Implemented |
-| **Phase 2** | Tool descriptions | DSPy + GEPA | 🔲 Planned |
-| **Phase 3** | System prompt sections | DSPy + GEPA | 🔲 Planned |
-| **Phase 4** | Tool implementation code | Darwinian Evolver | 🔲 Planned |
-| **Phase 5** | Continuous improvement loop | Automated pipeline | 🔲 Planned |
+| **Phase 2** | Tool descriptions | DSPy + GEPA | ✅ Implemented |
+| **Phase 3** | System prompt sections | DSPy + GEPA | ✅ Implemented |
+| **Phase 4** | Tool implementation code | Darwinian Evolver | ✅ Implemented |
+| **Phase 5** | Continuous improvement loop | Automated pipeline | ✅ Implemented |
 
 ## Engines
 

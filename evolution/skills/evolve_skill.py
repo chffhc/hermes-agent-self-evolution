@@ -6,6 +6,8 @@ Usage:
 """
 
 import json
+import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -21,16 +23,45 @@ from rich.table import Table
 from evolution.core.config import EvolutionConfig, get_hermes_agent_path
 from evolution.core.dataset_builder import SyntheticDatasetBuilder, EvalDataset, GoldenDatasetLoader
 from evolution.core.external_importers import build_dataset_from_external
-from evolution.core.fitness import skill_fitness_metric, LLMJudge, FitnessScore
+from evolution.core.fitness import skill_fitness_metric, LLMJudge, FitnessScore, make_llm_judge_metric
 from evolution.core.constraints import ConstraintValidator
 from evolution.skills.skill_module import (
     SkillModule,
     load_skill,
     find_skill,
     reassemble_skill,
+    extract_evolved_skill_text,
 )
 
 console = Console()
+
+
+def make_dashscope_lm(model: str = "qwen3.6-plus", num_retries: int = 8, **kwargs) -> dspy.LM:
+    """Create a dspy.LM configured for DashScope (aliyun) via ~/.hermes/.env."""
+    # Read API key from hermes .env
+    env_path = Path.home() / ".hermes" / ".env"
+    api_key = os.getenv("DASHSCOPE_API_KEY", "")
+    if env_path.exists() and not api_key:
+        for line in env_path.read_text().splitlines():
+            line = line.strip()
+            if line.startswith("DASHSCOPE_API_KEY="):
+                api_key = line.split("=", 1)[1].strip()
+                break
+
+    if not api_key:
+        # Fallback: try OPENAI_API_KEY (some DashScope proxies use this)
+        api_key = os.getenv("OPENAI_API_KEY", "")
+
+    base_url = "https://coding.dashscope.aliyuncs.com/v1"
+
+    return dspy.LM(
+        model=f"openai/{model}",  # Use openai prefix for DashScope compatibility
+        api_key=api_key,
+        api_base=base_url,
+        model_type="chat",
+        num_retries=num_retries,
+        **kwargs,
+    )
 
 
 def evolve(
@@ -38,8 +69,8 @@ def evolve(
     iterations: int = 10,
     eval_source: str = "synthetic",
     dataset_path: Optional[str] = None,
-    optimizer_model: str = "openai/gpt-4.1",
-    eval_model: str = "openai/gpt-4.1-mini",
+    optimizer_model: str = "qwen3.6-plus",
+    eval_model: str = "qwen3.6-plus",
     hermes_repo: Optional[str] = None,
     run_tests: bool = False,
     dry_run: bool = False,
@@ -119,7 +150,7 @@ def evolve(
     # ── 3. Validate constraints on baseline ─────────────────────────────
     console.print(f"\n[bold]Validating baseline constraints[/bold]")
     validator = ConstraintValidator(config)
-    baseline_constraints = validator.validate_all(skill["body"], "skill")
+    baseline_constraints = validator.validate_all(skill["raw"], "skill")
     all_pass = True
     for c in baseline_constraints:
         icon = "✓" if c.passed else "✗"
@@ -137,9 +168,12 @@ def evolve(
     console.print(f"  Optimizer model: {optimizer_model}")
     console.print(f"  Eval model: {eval_model}")
 
-    # Configure DSPy
-    lm = dspy.LM(eval_model)
-    dspy.configure(lm=lm)
+    # Configure DSPy with DashScope LM — MUST use ChatAdapter for DashScope
+    from dspy.adapters import ChatAdapter
+
+    lm = make_dashscope_lm(eval_model, num_retries=8)
+    dspy.configure(lm=lm, adapter=ChatAdapter())
+    console.print(f"  DSPy configured: {eval_model} (ChatAdapter, DashScope)")
 
     # Create the baseline skill module
     baseline_module = SkillModule(skill["body"])
@@ -154,9 +188,16 @@ def evolve(
     start_time = time.time()
 
     try:
+        # Create reflection LM for GEPA
+        reflection_lm = make_dashscope_lm(optimizer_model, num_retries=8, temperature=1.0)
+
+        # Use LLM-as-judge metric for meaningful fitness signal
+        judge_metric = make_llm_judge_metric(config, skill["body"])
+
         optimizer = dspy.GEPA(
-            metric=skill_fitness_metric,
-            max_steps=iterations,
+            metric=judge_metric,
+            max_metric_calls=iterations * 5,  # 5x evals per iteration for proper exploration
+            reflection_lm=reflection_lm,
         )
 
         optimized_module = optimizer.compile(
@@ -167,9 +208,16 @@ def evolve(
     except Exception as e:
         # Fall back to MIPROv2 if GEPA isn't available in this DSPy version
         console.print(f"[yellow]GEPA not available ({e}), falling back to MIPROv2[/yellow]")
+        # MIPROv2 uses 'auto' to control budget: light(~10), medium(~50), heavy(~200)
+        auto_budget = "light" if iterations <= 10 else ("medium" if iterations <= 50 else "heavy")
+
+        # Use LLM-as-judge metric for meaningful fitness signal
+        judge_metric = make_llm_judge_metric(config, skill["body"])
+
         optimizer = dspy.MIPROv2(
-            metric=skill_fitness_metric,
-            auto="light",
+            metric=judge_metric,
+            auto=auto_budget,
+            num_threads=1,
         )
         optimized_module = optimizer.compile(
             baseline_module,
@@ -180,13 +228,13 @@ def evolve(
     console.print(f"\n  Optimization completed in {elapsed:.1f}s")
 
     # ── 6. Extract evolved skill text ───────────────────────────────────
-    # The optimized module's instructions contain the evolved skill text
-    evolved_body = optimized_module.skill_text
+    # Use sentinel-based extraction to avoid the --- separator bug
+    evolved_body = extract_evolved_skill_text(optimized_module)
     evolved_full = reassemble_skill(skill["frontmatter"], evolved_body)
 
     # ── 7. Validate evolved skill ───────────────────────────────────────
     console.print(f"\n[bold]Validating evolved skill[/bold]")
-    evolved_constraints = validator.validate_all(evolved_body, "skill", baseline_text=skill["body"])
+    evolved_constraints = validator.validate_all(evolved_full, "skill", baseline_text=skill["raw"])
     all_pass = True
     for c in evolved_constraints:
         icon = "✓" if c.passed else "✗"
@@ -206,21 +254,32 @@ def evolve(
 
     # ── 8. Evaluate on holdout set ──────────────────────────────────────
     console.print(f"\n[bold]Evaluating on holdout set ({len(dataset.holdout)} examples)[/bold]")
+    console.print(f"  Using LLM-as-judge (correctness + procedure + conciseness)")
 
     holdout_examples = dataset.to_dspy_examples("holdout")
+    holdout_judge = LLMJudge(config)
 
     baseline_scores = []
     evolved_scores = []
     for ex in holdout_examples:
-        # Score baseline
-        with dspy.context(lm=lm):
-            baseline_pred = baseline_module(task_input=ex.task_input)
-            baseline_score = skill_fitness_metric(ex, baseline_pred)
-            baseline_scores.append(baseline_score)
+        # Score baseline and evolved using LLM-as-judge
+        baseline_pred = baseline_module(task_input=ex.task_input)
+        baseline_score = holdout_judge.score(
+            task_input=ex.task_input,
+            expected_behavior=ex.expected_behavior,
+            agent_output=getattr(baseline_pred, "output", ""),
+            skill_text=skill["body"],
+        )
+        baseline_scores.append(baseline_score.composite)
 
-            evolved_pred = optimized_module(task_input=ex.task_input)
-            evolved_score = skill_fitness_metric(ex, evolved_pred)
-            evolved_scores.append(evolved_score)
+        evolved_pred = optimized_module(task_input=ex.task_input)
+        evolved_score = holdout_judge.score(
+            task_input=ex.task_input,
+            expected_behavior=ex.expected_behavior,
+            agent_output=getattr(evolved_pred, "output", ""),
+            skill_text=evolved_body,  # Use evolved skill text for evolved scoring
+        )
+        evolved_scores.append(evolved_score.composite)
 
     avg_baseline = sum(baseline_scores) / max(1, len(baseline_scores))
     avg_evolved = sum(evolved_scores) / max(1, len(evolved_scores))
@@ -299,8 +358,8 @@ def evolve(
 @click.option("--eval-source", default="synthetic", type=click.Choice(["synthetic", "golden", "sessiondb"]),
               help="Source for evaluation dataset")
 @click.option("--dataset-path", default=None, help="Path to existing eval dataset (JSONL)")
-@click.option("--optimizer-model", default="openai/gpt-4.1", help="Model for GEPA reflections")
-@click.option("--eval-model", default="openai/gpt-4.1-mini", help="Model for evaluations")
+@click.option("--optimizer-model", default="qwen3.6-plus", help="Model for GEPA reflections")
+@click.option("--eval-model", default="qwen3.6-plus", help="Model for evaluations")
 @click.option("--hermes-repo", default=None, help="Path to hermes-agent repo")
 @click.option("--run-tests", is_flag=True, help="Run full pytest suite as constraint gate")
 @click.option("--dry-run", is_flag=True, help="Validate setup without running optimization")
