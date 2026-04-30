@@ -20,7 +20,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from evolution.core.config import EvolutionConfig, get_hermes_agent_path, make_lm
+from evolution.core.config import EvolutionConfig, get_hermes_agent_path, make_lm, make_dashscope_lm
 from evolution.core.dataset_builder import SyntheticDatasetBuilder, EvalDataset, GoldenDatasetLoader
 from evolution.core.external_importers import build_dataset_from_external
 from evolution.core.fitness import skill_fitness_metric, LLMJudge, FitnessScore, make_llm_judge_metric
@@ -34,36 +34,6 @@ from evolution.skills.skill_module import (
 )
 
 console = Console()
-
-
-def make_dashscope_lm(model: str = "qwen3.6-plus", num_retries: int = 8, **kwargs) -> dspy.LM:
-    """Create a dspy.LM configured for DashScope (aliyun) via ~/.hermes/.env."""
-    # Read API key from hermes .env
-    env_path = Path.home() / ".hermes" / ".env"
-    api_key = os.getenv("DASHSCOPE_API_KEY", "")
-    if env_path.exists() and not api_key:
-        for line in env_path.read_text().splitlines():
-            line = line.strip()
-            if line.startswith("DASHSCOPE_API_KEY="):
-                api_key = line.split("=", 1)[1].strip()
-                break
-
-    if not api_key:
-        raise OSError(
-            "DASHSCOPE_API_KEY not found. Set it in ~/.hermes/.env or "
-            "export DASHSCOPE_API_KEY=sk-..."
-        )
-
-    base_url = "https://coding.dashscope.aliyuncs.com/v1"
-
-    return dspy.LM(
-        model=f"openai/{model}",  # Use openai prefix for DashScope compatibility
-        api_key=api_key,
-        api_base=base_url,
-        model_type="chat",
-        num_retries=num_retries,
-        **kwargs,
-    )
 
 
 def evolve(

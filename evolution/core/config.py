@@ -96,6 +96,15 @@ def make_lm(model: str, **kwargs) -> "dspy.LM":
     )
 
 
+def make_dashscope_lm(model: str = "qwen3.6-plus", num_retries: int = 8, **kwargs) -> "dspy.LM":
+    """Create a DashScope LM with ChatAdapter-compatible settings.
+
+    This is a convenience wrapper around make_lm that adds model_type='chat'
+    for the DashScope coding endpoint, required for DSPy ChatAdapter usage.
+    """
+    return make_lm(model=model, num_retries=num_retries, model_type="chat", **kwargs)
+
+
 @dataclass
 class EvolutionConfig:
     """Configuration for a self-evolution optimization run."""

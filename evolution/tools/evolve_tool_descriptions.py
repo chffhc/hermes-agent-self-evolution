@@ -31,6 +31,7 @@ from evolution.core.config import EvolutionConfig, get_hermes_agent_path
 from evolution.core.fitness import LLMJudge, FitnessScore
 from evolution.core.constraints import ConstraintValidator
 from evolution.core.pr_builder import PRBuilder, PRChange, PRMetrics
+from evolution.core.utils import parse_json_array
 
 console = Console()
 
@@ -252,7 +253,7 @@ class ToolSelectionDatasetBuilder:
 
             try:
                 result = self.generator(tools_json=tools_json)
-                examples_json = _parse_json_array(result.tool_selection_examples_json)
+                examples_json = parse_json_array(result.tool_selection_examples_json)
                 for ex in examples_json:
                     all_examples.append(ToolSelectionExample(
                         task_description=ex.get("task_description", ""),
@@ -277,33 +278,6 @@ class ToolSelectionDatasetBuilder:
         )
         return dataset
 
-
-def _parse_json_array(text: str) -> list[dict]:
-    """Parse a JSON array from LLM output, handling common formatting issues."""
-    text = text.strip()
-    # Extract JSON array from markdown code block if present
-    if "```" in text:
-        for line in text.split("\n"):
-            line = line.strip()
-            if line.startswith("["):
-                text = line
-                break
-        # Or find between ```json and ```
-        import re
-        match = re.search(r"```(?:json)?\s*\n([\s\S]*?)\n```", text)
-        if match:
-            text = match.group(1)
-
-    # Find the JSON array
-    start = text.find("[")
-    end = text.rfind("]")
-    if start >= 0 and end > start:
-        text = text[start:end + 1]
-
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        return []
 
 
 # ── Tool selection evaluator ────────────────────────────────────────────
@@ -520,7 +494,7 @@ def evolve_tool_descriptions(
     # ── 2. Configure DSPy first (MUST be before any ChainOfThought is created) ──
     console.print(f"\n[bold]Step 2: Configuring DSPy[/bold]")
     from dspy.adapters import ChatAdapter
-    from evolution.skills.evolve_skill import make_dashscope_lm
+    from evolution.core.config import make_dashscope_lm
 
     lm = make_dashscope_lm(eval_model, num_retries=8)
     dspy.configure(lm=lm, adapter=ChatAdapter())

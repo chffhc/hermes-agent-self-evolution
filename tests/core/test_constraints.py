@@ -17,7 +17,7 @@ class TestSizeConstraints:
         assert result.passed
 
     def test_skill_over_limit(self, validator):
-        result = validator._check_size("x" * 20_000, "skill")
+        result = validator._check_size("x" * 60_000, "skill")
         assert not result.passed
         assert "exceeded" in result.message
 

@@ -37,6 +37,7 @@ from evolution.core.config import EvolutionConfig
 from evolution.core.fitness import LLMJudge, FitnessScore
 from evolution.core.constraints import ConstraintValidator
 from evolution.core.pr_builder import PRBuilder, PRChange, PRMetrics
+from evolution.core.utils import parse_json_array
 
 console = Console()
 
@@ -271,7 +272,7 @@ class BehavioralTestGenerator:
                     section_content=section.content[:2000],
                     num_tests=tests_per_section,
                 )
-                examples_json = _parse_json_array(result.test_scenarios_json)
+                examples_json = parse_json_array(result.test_scenarios_json)
                 for ex in examples_json:
                     all_examples.append(BehavioralTestExample(
                         scenario=ex.get("scenario", ""),
@@ -291,23 +292,6 @@ class BehavioralTestGenerator:
 
         return dataset
 
-
-def _parse_json_array(text: str) -> list[dict]:
-    """Parse JSON array from LLM output."""
-    import re
-    text = text.strip()
-    # Try to extract JSON array
-    match = re.search(r"```(?:json)?\s*\n([\s\S]*?)\n```", text)
-    if match:
-        text = match.group(1)
-    start = text.find("[")
-    end = text.rfind("]")
-    if start >= 0 and end > start:
-        text = text[start:end + 1]
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        return []
 
 
 # ── Behavioral evaluator ────────────────────────────────────────────────
@@ -417,7 +401,7 @@ class PromptSectionModule(dspy.Module):
 
     class SectionTask(dspy.Signature):
         """Follow the system prompt instructions to handle a scenario."""
-        instructions: str = dspy.InputField(desc="System prompt section instructions")
+        prompt_guidance: str = dspy.InputField(desc="System prompt section instructions")
         scenario: str = dspy.InputField(desc="The scenario/task to handle")
         behavior: str = dspy.OutputField(desc="How you would respond/act")
 
@@ -438,7 +422,7 @@ class PromptSectionModule(dspy.Module):
             return dspy.Prediction(behavior="")
 
         result = predictor(
-            instructions=section.content,
+            prompt_guidance=section.content,
             scenario=scenario,
         )
         return dspy.Prediction(behavior=result.behavior)
@@ -563,7 +547,7 @@ def evolve_prompt_section(
     # ── 2. Configure DSPy first (MUST be before any ChainOfThought is created) ──
     console.print(f"\n[bold]Step 2: Configuring DSPy[/bold]")
     from dspy.adapters import ChatAdapter
-    from evolution.skills.evolve_skill import make_dashscope_lm
+    from evolution.core.config import make_dashscope_lm
 
     lm = make_dashscope_lm(eval_model, num_retries=8)
     dspy.configure(lm=lm, adapter=ChatAdapter())
