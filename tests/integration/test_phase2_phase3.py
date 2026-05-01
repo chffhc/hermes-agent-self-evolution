@@ -196,12 +196,59 @@ class TestPromptSectionModule:
         predict = getattr(cot, "predict", cot)
         sig = getattr(predict, "signature", None)
         assert sig is not None
-        # Phase 3 passes section as input field (prompt_guidance), not embedded
-        # in instruction — this is a known design tradeoff vs Phase 1/2
+
+        # Section content should be embedded in the instruction (sentinel approach)
+        doc = getattr(sig, "__doc__", "") or getattr(sig, "instructions", "")
+        assert "<!-- __PROMPT_SECTION_START__ -->" in doc
+        assert "<!-- __PROMPT_SECTION_END__ -->" in doc
+        assert "Do the thing" in doc
+
+        # prompt_guidance should NOT be an input field (it was the original bug)
         field_names = set(sig.fields.keys())
-        assert "prompt_guidance" in field_names
+        assert "prompt_guidance" not in field_names
         assert "scenario" in field_names
         assert "behavior" in field_names
+
+    def test_get_evolved_sections(self):
+        """Verify evolved section content can be extracted from compiled module."""
+        from evolution.prompts.evolve_prompt_section import (
+            _SECTION_SENTINEL_END,
+            _SECTION_SENTINEL_START,
+            PromptSection,
+            PromptSectionModule,
+        )
+
+        sections = [
+            PromptSection(
+                name="MEMORY",
+                content="Original memory guidance",
+                file_path="agent/prompt_builder.py",
+                description="Memory guidance",
+                max_growth_pct=20,
+                risk_level="low",
+            ),
+        ]
+        module = PromptSectionModule(sections)
+
+        # Mock the compiled predictor's signature with evolved content
+        evolved_content = "EVOLVED: Use memory aggressively and save everything"
+        instruction = (
+            f"prefix {_SECTION_SENTINEL_START}\n{evolved_content}\n{_SECTION_SENTINEL_END} suffix"
+        )
+
+        class FakeSignature:
+            __doc__ = instruction
+
+        class FakePredict:
+            signature = FakeSignature()
+
+        module.predictors["MEMORY"].predict = FakePredict()
+
+        evolved = module.get_evolved_sections()
+        assert len(evolved) == 1
+        assert evolved[0].name == "MEMORY"
+        assert "EVOLVED" in evolved[0].content
+        assert "Original" not in evolved[0].content
 
 
 # ═══════════════════════════════════════════════════════════════════════════

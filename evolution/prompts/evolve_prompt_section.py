@@ -388,39 +388,83 @@ class BehavioralEvaluator:
 
 # ── Section-as-DSPy-parameter module ────────────────────────────────────
 
+_SECTION_SENTINEL_START = "<!-- __PROMPT_SECTION_START__ -->"
+_SECTION_SENTINEL_END = "<!-- __PROMPT_SECTION_END__ -->"
+
+
 class PromptSectionModule(dspy.Module):
     """DSPy module wrapping prompt sections for GEPA optimization.
 
-    Each section is a separate optimizable parameter.
+    Each section is embedded in its predictor's signature instruction via
+    sentinels, making it an optimizable parameter for GEPA (same approach
+    as SkillModule and ToolDescriptionModule).
     """
-
-    class SectionTask(dspy.Signature):
-        """Follow the system prompt instructions to handle a scenario."""
-        prompt_guidance: str = dspy.InputField(desc="System prompt section instructions")
-        scenario: str = dspy.InputField(desc="The scenario/task to handle")
-        behavior: str = dspy.OutputField(desc="How you would respond/act")
 
     def __init__(self, sections: list[PromptSection]):
         super().__init__()
-        self.sections = {s.name: s for s in sections}
+        self._section_data = {s.name: s for s in sections}
         self.predictors = {}
+
         for section in sections:
-            self.predictors[section.name] = dspy.ChainOfThought(self.SectionTask)
+            self.predictors[section.name] = self._make_predictor(section)
+
+    def _make_predictor(self, section: PromptSection):
+        """Create a predictor with section content embedded in the instruction."""
+
+        class SectionTask(dspy.Signature):
+            __doc__ = (
+                "Follow the system prompt instructions to handle a scenario.\n"
+                "Read the instructions below carefully and act accordingly.\n\n"
+                f"{_SECTION_SENTINEL_START}\n{section.content}\n{_SECTION_SENTINEL_END}"
+            )
+            scenario: str = dspy.InputField(desc="The scenario/task to handle")
+            behavior: str = dspy.OutputField(desc="How you would respond/act")
+
+        return dspy.ChainOfThought(SectionTask)
 
     def forward(self, section_name: str, scenario: str) -> dspy.Prediction:
-        section = self.sections.get(section_name)
-        if not section:
-            return dspy.Prediction(behavior="")
-
         predictor = self.predictors.get(section_name)
         if not predictor:
             return dspy.Prediction(behavior="")
 
-        result = predictor(
-            prompt_guidance=section.content,
-            scenario=scenario,
-        )
+        result = predictor(scenario=scenario)
         return dspy.Prediction(behavior=result.behavior)
+
+    def get_evolved_sections(self) -> list[PromptSection]:
+        """Extract evolved section content from compiled predictors."""
+        evolved = []
+
+        for name, original in self._section_data.items():
+            predictor = self.predictors.get(name)
+            content = original.content  # fallback
+
+            if predictor:
+                # ChainOfThought wraps a Predict — go through .predict
+                inner = getattr(predictor, "predict", predictor)
+                instruction = ""
+                for sig_attr in ("extended_signature", "signature"):
+                    sig = getattr(inner, sig_attr, None)
+                    if sig is None:
+                        continue
+                    instruction = getattr(sig, "instructions", None) or getattr(sig, "__doc__", "") or ""
+                    if instruction:
+                        break
+
+                start_idx = instruction.find(_SECTION_SENTINEL_START)
+                end_idx = instruction.find(_SECTION_SENTINEL_END)
+                if start_idx != -1 and end_idx != -1:
+                    content = instruction[start_idx + len(_SECTION_SENTINEL_START):end_idx].strip()
+
+            evolved.append(PromptSection(
+                name=name,
+                content=content,
+                file_path=original.file_path,
+                description=original.description,
+                max_growth_pct=original.max_growth_pct,
+                risk_level=original.risk_level,
+            ))
+
+        return evolved
 
 
 # ── Prompt section fitness metric ───────────────────────────────────────
@@ -644,8 +688,8 @@ def evolve_prompt_section(
     # ── 6. Evaluate evolved behavior ────────────────────────────────────
     console.print("\n[bold]Step 5: Evaluating evolved behavior[/bold]")
 
-    if optimized_module and hasattr(optimized_module, 'sections'):
-        evolved_sections = list(optimized_module.sections.values())
+    if optimized_module and hasattr(optimized_module, 'get_evolved_sections'):
+        evolved_sections = optimized_module.get_evolved_sections()
     else:
         evolved_sections = sections
 
