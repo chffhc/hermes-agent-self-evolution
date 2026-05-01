@@ -13,24 +13,18 @@ Usage:
 """
 
 import json
-import os
 import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 import click
 import dspy
 from rich.console import Console
-from rich.panel import Panel
 from rich.table import Table
 
-from evolution.core.config import EvolutionConfig, get_hermes_agent_path
-from evolution.core.fitness import LLMJudge, FitnessScore
-from evolution.core.constraints import ConstraintValidator
-from evolution.core.pr_builder import PRBuilder, PRChange, PRMetrics
+from evolution.core.config import EvolutionConfig
 from evolution.core.utils import parse_json_array
 
 console = Console()
@@ -130,8 +124,7 @@ def extract_tool_descriptions(
     sys.path.insert(0, str(hermes_agent_path))
 
     try:
-        from tools.registry import registry
-        from tools.registry import discover_builtin_tools
+        from tools.registry import discover_builtin_tools, registry
 
         # Discover and import all tool modules
         discover_builtin_tools(hermes_agent_path / "tools")
@@ -224,10 +217,10 @@ class ToolSelectionDatasetBuilder:
     def generate(
         self,
         tools: list[ToolDescription],
-        output_path: Optional[Path] = None,
+        output_path: Path | None = None,
     ) -> ToolEvalDataset:
         """Generate a tool selection dataset."""
-        console.print(f"\n[bold]Generating tool selection dataset[/bold]")
+        console.print("\n[bold]Generating tool selection dataset[/bold]")
         console.print(f"  Tools: {len(tools)}")
 
         # Split into batches to avoid context overflow
@@ -434,9 +427,12 @@ def tool_selection_fitness_metric(
     example: dspy.Example,
     prediction: dspy.Prediction,
     trace=None,
+    pred_name: str | None = None,
+    pred_trace=None,
 ) -> float:
     """DSPy metric for tool selection accuracy.
 
+    GEPA-compatible 5-arg signature.
     Returns 1.0 if the selected tool matches the correct tool, 0.0 otherwise.
     """
     selected = getattr(prediction, "selected_tool", "").strip()
@@ -450,9 +446,9 @@ def evolve_tool_descriptions(
     iterations: int = 10,
     optimizer_model: str = "qwen3.6-plus",
     eval_model: str = "qwen3.6-plus",
-    hermes_repo: Optional[str] = None,
-    tool_filter: Optional[list[str]] = None,
-    dataset_path: Optional[str] = None,
+    hermes_repo: str | None = None,
+    tool_filter: list[str] | None = None,
+    dataset_path: str | None = None,
     dry_run: bool = False,
 ):
     """Main function to evolve tool descriptions."""
@@ -466,8 +462,8 @@ def evolve_tool_descriptions(
     if hermes_repo:
         config.hermes_agent_path = Path(hermes_repo)
 
-    console.print(f"\n[bold cyan]🧬 Hermes Agent Self-Evolution[/bold cyan] — "
-                  f"Evolving tool descriptions\n")
+    console.print("\n[bold cyan]🧬 Hermes Agent Self-Evolution[/bold cyan] — "
+                  "Evolving tool descriptions\n")
 
     # ── 1. Extract current tool descriptions ────────────────────────────
     console.print("[bold]Step 1: Extracting tool descriptions[/bold]")
@@ -479,7 +475,7 @@ def evolve_tool_descriptions(
     else:
         tools = all_tools
         console.print(f"  Found {len(tools)} tools across "
-                      f"{len(set(t.toolset for t in tools))} toolsets")
+                      f"{len({t.toolset for t in tools})} toolsets")
 
     # Print summary
     for t in tools[:10]:
@@ -488,12 +484,13 @@ def evolve_tool_descriptions(
         console.print(f"  ... and {len(tools) - 10} more")
 
     if dry_run:
-        console.print(f"\n[bold green]DRY RUN — setup validated.[/bold green]")
+        console.print("\n[bold green]DRY RUN — setup validated.[/bold green]")
         return
 
     # ── 2. Configure DSPy first (MUST be before any ChainOfThought is created) ──
-    console.print(f"\n[bold]Step 2: Configuring DSPy[/bold]")
+    console.print("\n[bold]Step 2: Configuring DSPy[/bold]")
     from dspy.adapters import ChatAdapter
+
     from evolution.core.config import make_dashscope_lm
 
     lm = make_dashscope_lm(eval_model, num_retries=8)
@@ -501,7 +498,7 @@ def evolve_tool_descriptions(
     console.print(f"  DSPy configured: {eval_model} (ChatAdapter, DashScope)")
 
     # ── 3. Build tool selection dataset ─────────────────────────────────
-    console.print(f"\n[bold]Step 3: Building tool selection dataset[/bold]")
+    console.print("\n[bold]Step 3: Building tool selection dataset[/bold]")
 
     dataset_path_obj = Path(dataset_path) if dataset_path else Path("datasets/tools/tool_selection")
 
@@ -517,7 +514,7 @@ def evolve_tool_descriptions(
         sys.exit(1)
 
     # ── 4. Evaluate baseline accuracy ───────────────────────────────────
-    console.print(f"\n[bold]Step 4: Evaluating baseline tool selection[/bold]")
+    console.print("\n[bold]Step 4: Evaluating baseline tool selection[/bold]")
     evaluator = ToolSelectionEvaluator(config)
 
     baseline_accuracy, baseline_per_tool = evaluator.evaluate(tools, dataset.holdout)
@@ -587,7 +584,7 @@ def evolve_tool_descriptions(
         elapsed = time.time() - start_time
 
     # ── 6. Evaluate evolved accuracy ────────────────────────────────────
-    console.print(f"\n[bold]Step 5: Evaluating evolved tool selection[/bold]")
+    console.print("\n[bold]Step 5: Evaluating evolved tool selection[/bold]")
 
     if optimized_module and hasattr(optimized_module, 'tools'):
         evolved_tools = optimized_module.tools
@@ -598,7 +595,7 @@ def evolve_tool_descriptions(
     improvement = evolved_accuracy - baseline_accuracy
 
     # ── 7. Validate constraints ─────────────────────────────────────────
-    console.print(f"\n[bold]Step 6: Validating constraints[/bold]")
+    console.print("\n[bold]Step 6: Validating constraints[/bold]")
     violations = validate_tool_descriptions(evolved_tools)
     if violations:
         for v in violations:

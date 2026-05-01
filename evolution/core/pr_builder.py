@@ -7,13 +7,10 @@ All evolved changes go through PR — never direct commit.
 """
 
 import difflib
-import json
 import subprocess
-import sys
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 
 @dataclass
@@ -50,8 +47,8 @@ class PRResult:
     """Result of creating a PR."""
     success: bool
     branch_name: str
-    pr_url: Optional[str] = None
-    error: Optional[str] = None
+    pr_url: str | None = None
+    error: str | None = None
     diff_summary: str = ""
 
 
@@ -263,7 +260,7 @@ class PRBuilder:
 
         if metrics.constraint_violations:
             body += (
-                f"### Constraint Violations (filtered during evolution)\n\n"
+                "### Constraint Violations (filtered during evolution)\n\n"
             )
             for v in metrics.constraint_violations:
                 body += f"- {v}\n"
@@ -271,8 +268,8 @@ class PRBuilder:
 
         if metrics.benchmark_regressions:
             body += (
-                f"### ⚠️ Benchmark Regressions\n\n"
-                f"These variants were rejected due to benchmark regression:\n\n"
+                "### ⚠️ Benchmark Regressions\n\n"
+                "These variants were rejected due to benchmark regression:\n\n"
             )
             for r in metrics.benchmark_regressions:
                 body += f"- {r}\n"

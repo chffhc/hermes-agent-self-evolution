@@ -17,17 +17,14 @@ import os
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 import click
 from rich.console import Console
 
 from evolution.core.config import get_hermes_agent_path
-from evolution.core.constraints import ConstraintValidator
-from evolution.core.pr_builder import PRBuilder, PRChange, PRMetrics
 
 console = Console()
 
@@ -73,14 +70,13 @@ class CodeEvolutionResult:
 def wrap_tool_as_organism(
     tool_name: str,
     hermes_agent_path: Path,
-) -> Optional[CodeOrganism]:
+) -> CodeOrganism | None:
     """Map a tool file to a CodeOrganism for Darwinian Evolver.
 
     Extracts frozen function signatures and registry calls that
     must not be changed during evolution.
     """
     import ast
-    import re
 
     tools_dir = hermes_agent_path / "tools"
     tool_file = None
@@ -143,7 +139,7 @@ def wrap_tool_as_organism(
 def run_pytest_for_tool(
     tool_name: str,
     hermes_agent_path: Path,
-    test_files: Optional[list[str]] = None,
+    test_files: list[str] | None = None,
 ) -> tuple[bool, str]:
     """Run pytest for a specific tool.
 
@@ -178,7 +174,7 @@ def run_pytest_for_tool(
 def evaluate_code_fitness(
     tool_name: str,
     hermes_agent_path: Path,
-    bug_repro: Optional[BugReproduction] = None,
+    bug_repro: BugReproduction | None = None,
 ) -> tuple[float, dict]:
     """Composite fitness score for evolved code.
 
@@ -260,7 +256,7 @@ def evaluate_code_fitness(
 def validate_code_constraints(
     tool_name: str,
     hermes_agent_path: Path,
-    original_file: Optional[str] = None,
+    original_file: str | None = None,
 ) -> list[dict]:
     """Validate evolved code meets all safety constraints.
 
@@ -307,7 +303,6 @@ def validate_code_constraints(
 
     # Check error handling
     try_count = content.count("try:")
-    except_count = content.count("except")
     if original_file:
         original_try = original_file.count("try:")
         if try_count < original_try:
@@ -327,7 +322,7 @@ def validate_code_constraints(
 def run_darwinian_evolver(
     organism_path: Path,
     iterations: int = 10,
-    work_dir: Optional[Path] = None,
+    work_dir: Path | None = None,
 ) -> tuple[bool, str]:
     """Run Darwinian Evolver CLI on an organism.
 
@@ -384,8 +379,8 @@ def run_darwinian_evolver(
 def evolve_tool_code(
     tool_name: str,
     iterations: int = 10,
-    bug_issue: Optional[int] = None,
-    hermes_repo: Optional[str] = None,
+    bug_issue: int | None = None,
+    hermes_repo: str | None = None,
     dry_run: bool = False,
 ):
     """Main function to evolve tool implementation code."""
@@ -410,11 +405,11 @@ def evolve_tool_code(
     original_content = organism.file_path.read_text()
 
     if dry_run:
-        console.print(f"\n[bold green]DRY RUN — setup validated.[/bold green]")
+        console.print("\n[bold green]DRY RUN — setup validated.[/bold green]")
         return
 
     # ── 2. Evaluate baseline fitness ────────────────────────────────────
-    console.print(f"\n[bold]Step 2: Evaluating baseline fitness[/bold]")
+    console.print("\n[bold]Step 2: Evaluating baseline fitness[/bold]")
 
     # Run tests
     tests_passed, test_output = run_pytest_for_tool(tool_name, hermes_agent_path)
@@ -445,7 +440,7 @@ def evolve_tool_code(
         return
 
     # ── 4. Validate evolved code ────────────────────────────────────────
-    console.print(f"\n[bold]Step 4: Validating evolved code[/bold]")
+    console.print("\n[bold]Step 4: Validating evolved code[/bold]")
 
     violations = validate_code_constraints(
         tool_name, hermes_agent_path, original_file=original_content

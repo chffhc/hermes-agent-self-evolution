@@ -22,20 +22,16 @@ Usage:
 
 import json
 import logging
-import os
 import sqlite3
-import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
 
 from rich.console import Console
-from rich.table import Table
 
+from evolution.core.benchmark_gate import BenchmarkGate
 from evolution.core.config import get_hermes_agent_path
-from evolution.core.benchmark_gate import BenchmarkGate, BenchmarkResult
 
 console = Console()
 
@@ -44,7 +40,7 @@ console = Console()
 logger = logging.getLogger("hermes-self-evolution.monitor")
 
 
-def _setup_logging(log_file: Optional[Path] = None):
+def _setup_logging(log_file: Path | None = None):
     """Configure structured logging for continuous evolution.
 
     Outputs to both console (via Rich handler) and a rotating log file.
@@ -122,7 +118,7 @@ class BenchmarkTrend:
     scores: list[tuple[str, float]]  # (timestamp, score)
 
     @property
-    def latest_score(self) -> Optional[float]:
+    def latest_score(self) -> float | None:
         return self.scores[-1][1] if self.scores else None
 
     @property
@@ -160,7 +156,7 @@ class PerformanceMonitor:
     per-tool performance metrics over time.
     """
 
-    def __init__(self, hermes_agent_path: Optional[Path] = None):
+    def __init__(self, hermes_agent_path: Path | None = None):
         self.hermes_agent_path = hermes_agent_path or get_hermes_agent_path()
         self.metrics_file = Path("evolution/monitor/metrics_store.json")
         self._metrics = self._load_metrics()
@@ -262,7 +258,7 @@ class PerformanceMonitor:
             tool_call_pattern = re.compile(r"Tool call: (\w+)")
             error_pattern = re.compile(r"Tool execution failed|Error:|Exception:")
 
-            with open(log_path, "r") as f:
+            with open(log_path) as f:
                 for line in f:
                     tool_match = tool_call_pattern.search(line)
                     if tool_match:
@@ -444,7 +440,7 @@ class ContinuousEvolution:
 
     def __init__(
         self,
-        hermes_agent_path: Optional[Path] = None,
+        hermes_agent_path: Path | None = None,
         max_targets: int = 3,
         benchmark_gate: bool = True,
         optimize_iterations: int = 10,
@@ -480,7 +476,7 @@ class ContinuousEvolution:
         self.checkpoint_file.write_text(json.dumps(checkpoint, indent=2, ensure_ascii=False))
         logger.debug("Checkpoint saved: %d targets remaining", len(targets) - next_target_index)
 
-    def _load_checkpoint(self) -> Optional[dict]:
+    def _load_checkpoint(self) -> dict | None:
         """Load interrupted checkpoint if available."""
         if self.checkpoint_file.exists():
             try:

@@ -18,7 +18,6 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 
 @dataclass
@@ -31,7 +30,7 @@ class BenchmarkResult:
     failed_tasks: int
     elapsed_seconds: float
     timestamp: str
-    error: Optional[str] = None
+    error: str | None = None
     details: dict = field(default_factory=dict)
 
 
@@ -54,9 +53,9 @@ class BenchmarkGate:
 
     def __init__(
         self,
-        hermes_agent_path: Optional[Path] = None,
+        hermes_agent_path: Path | None = None,
         max_regression: float = 0.02,
-        baseline_file: Optional[Path] = None,
+        baseline_file: Path | None = None,
     ):
         self.hermes_agent_path = hermes_agent_path or Path.home() / ".hermes" / "hermes-agent"
         self.max_regression = max_regression
@@ -86,7 +85,7 @@ class BenchmarkGate:
 
     def run_tblite_fast(
         self,
-        skill_overrides: Optional[dict[str, str]] = None,
+        skill_overrides: dict[str, str] | None = None,
         timeout: int = 1800,
     ) -> BenchmarkResult:
         """Run TBLite fast subset (20 tasks).
@@ -105,7 +104,7 @@ class BenchmarkGate:
 
     def run_tblite_full(
         self,
-        skill_overrides: Optional[dict[str, str]] = None,
+        skill_overrides: dict[str, str] | None = None,
         timeout: int = 7200,
     ) -> BenchmarkResult:
         """Run full TBLite (100 tasks)."""
@@ -119,7 +118,7 @@ class BenchmarkGate:
 
     def run_yc_bench_fast(
         self,
-        skill_overrides: Optional[dict[str, str]] = None,
+        skill_overrides: dict[str, str] | None = None,
         timeout: int = 3600,
     ) -> BenchmarkResult:
         """Run YC-Bench fast_test (~50 turns)."""
@@ -136,7 +135,7 @@ class BenchmarkGate:
         name: str,
         description: str,
         task_count: int,
-        skill_overrides: Optional[dict[str, str]] = None,
+        skill_overrides: dict[str, str] | None = None,
         timeout: int = 1800,
     ) -> BenchmarkResult:
         """Run a benchmark and return results."""
@@ -223,7 +222,7 @@ class BenchmarkGate:
     def check_gate(
         self,
         results: list[BenchmarkResult],
-        max_regression: Optional[float] = None,
+        max_regression: float | None = None,
     ) -> GateResult:
         """Check if all benchmark gates pass (no significant regression).
 
@@ -263,7 +262,7 @@ class BenchmarkGate:
 
 
 def establish_baselines(
-    hermes_agent_path: Optional[Path] = None,
+    hermes_agent_path: Path | None = None,
 ) -> dict[str, float]:
     """Run all benchmarks with current (baseline) skills and store scores.
 

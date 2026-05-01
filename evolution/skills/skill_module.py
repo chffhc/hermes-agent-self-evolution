@@ -10,9 +10,7 @@ Fixes:
 - HTML comment sentinel for clean extraction of evolved skill body.
 """
 
-import re
 from pathlib import Path
-from typing import Optional
 
 import dspy
 
@@ -64,7 +62,7 @@ def load_skill(skill_path: Path) -> dict:
     }
 
 
-def find_skill(skill_name: str, hermes_agent_path: Path) -> Optional[Path]:
+def find_skill(skill_name: str, hermes_agent_path: Path) -> Path | None:
     """Find a skill by name in the hermes-agent skills directory.
 
     Searches recursively for a SKILL.md in a directory matching the skill name.

@@ -5,14 +5,14 @@ Supports length penalties and multi-dimensional scoring.
 GEPA-compatible with 5-arg metric signature.
 """
 
-import dspy
 from dataclasses import dataclass
-from typing import Optional
+
+import dspy
 
 from evolution.core.config import EvolutionConfig
 
-# GEPA trace type — use Optional to avoid import if DSPy changes it
-DSPyTrace = Optional[object]
+# GEPA trace type
+DSPyTrace = object | None
 
 
 @dataclass
@@ -71,8 +71,8 @@ class LLMJudge:
         expected_behavior: str,
         agent_output: str,
         skill_text: str,
-        artifact_size: Optional[int] = None,
-        max_size: Optional[int] = None,
+        artifact_size: int | None = None,
+        max_size: int | None = None,
     ) -> FitnessScore:
         """Score an agent output using LLM-as-judge."""
 
@@ -111,7 +111,7 @@ def skill_fitness_metric(
     example: dspy.Example,
     prediction: dspy.Prediction,
     trace: DSPyTrace = None,
-    pred_name: Optional[str] = None,
+    pred_name: str | None = None,
     pred_trace: DSPyTrace = None,
 ) -> float:
     """DSPy-compatible metric function for skill optimization.
@@ -124,7 +124,6 @@ def skill_fitness_metric(
     # The prediction should have an 'output' field with the agent's response
     agent_output = getattr(prediction, "output", "") or ""
     expected = getattr(example, "expected_behavior", "") or ""
-    task = getattr(example, "task_input", "") or ""
 
     if not agent_output.strip():
         return 0.0
@@ -149,22 +148,22 @@ def skill_fitness_metric(
 
 def make_llm_judge_metric(config: EvolutionConfig, skill_text: str):
     """Create a DSPy-compatible metric function using LLM-as-judge.
-    
+
     Returns a function compatible with GEPA's 5-parameter signature:
     (gold, pred, trace, pred_name, pred_trace) -> float
-    
+
     Also works with 3-param signature for MIPROv2 fallback.
     """
     judge = LLMJudge(config)
-    
+
     def metric_fn(example, prediction, trace=None, pred_name=None, pred_trace=None) -> float:
         task_input = getattr(example, "task_input", "") or ""
         expected_behavior = getattr(example, "expected_behavior", "") or ""
         agent_output = getattr(prediction, "output", "") or ""
-        
+
         if not agent_output.strip():
             return 0.0
-        
+
         score = judge.score(
             task_input=task_input,
             expected_behavior=expected_behavior,
@@ -172,7 +171,7 @@ def make_llm_judge_metric(config: EvolutionConfig, skill_text: str):
             skill_text=skill_text,
         )
         return score.composite
-    
+
     return metric_fn
 
 

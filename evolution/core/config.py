@@ -4,10 +4,14 @@ Automatically discovers DashScope API credentials from ~/.hermes/.env
 to match the user's existing Hermes Agent configuration.
 """
 
-import os
 import functools
-from pathlib import Path
+import os
 from dataclasses import dataclass, field
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import dspy
 
 
 @functools.lru_cache(maxsize=1)

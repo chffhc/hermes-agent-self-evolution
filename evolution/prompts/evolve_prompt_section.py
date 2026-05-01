@@ -25,18 +25,13 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 import click
 import dspy
 from rich.console import Console
-from rich.panel import Panel
 from rich.table import Table
 
 from evolution.core.config import EvolutionConfig
-from evolution.core.fitness import LLMJudge, FitnessScore
-from evolution.core.constraints import ConstraintValidator
-from evolution.core.pr_builder import PRBuilder, PRChange, PRMetrics
 from evolution.core.utils import parse_json_array
 
 console = Console()
@@ -92,8 +87,8 @@ class BehavioralTestExample:
     scenario: str  # The situation/task
     section_name: str  # Which section this tests
     expected_behavior: str  # Rubric for good behavior
-    expected_tool_usage: Optional[str] = None  # Should use this tool
-    should_not_do: Optional[str] = None  # Should NOT do this
+    expected_tool_usage: str | None = None  # Should use this tool
+    should_not_do: str | None = None  # Should NOT do this
 
 
 @dataclass
@@ -156,7 +151,7 @@ class PromptEvalDataset:
 
 def extract_prompt_sections(
     hermes_agent_path: Path,
-    section_names: Optional[list[str]] = None,
+    section_names: list[str] | None = None,
 ) -> list[PromptSection]:
     """Extract prompt section content from hermes-agent source files.
 
@@ -194,7 +189,7 @@ def extract_prompt_sections(
     return sections
 
 
-def _extract_constant(file_path: Path, name: str) -> Optional[str]:
+def _extract_constant(file_path: Path, name: str) -> str | None:
     """Extract a Python string constant from source code.
 
     Handles multi-line string definitions (parenthesized tuples of strings).
@@ -259,7 +254,7 @@ class BehavioralTestGenerator:
         self,
         sections: list[PromptSection],
         tests_per_section: int = 10,
-        output_path: Optional[Path] = None,
+        output_path: Path | None = None,
     ) -> PromptEvalDataset:
         """Generate behavioral tests for all sections."""
         all_examples = []
@@ -434,9 +429,12 @@ def prompt_section_fitness_metric(
     example: dspy.Example,
     prediction: dspy.Prediction,
     trace=None,
+    pred_name: str | None = None,
+    pred_trace=None,
 ) -> float:
     """DSPy metric for prompt section optimization.
 
+    GEPA-compatible 5-arg signature.
     Uses keyword overlap as a fast proxy, but without arbitrary floors.
     Returns 0.0 for empty output, overlap-based score otherwise.
     """
@@ -459,7 +457,7 @@ def prompt_section_fitness_metric(
 
 def validate_prompt_sections(
     sections: list[PromptSection],
-    baseline_sections: Optional[list[PromptSection]] = None,
+    baseline_sections: list[PromptSection] | None = None,
 ) -> list[dict]:
     """Validate evolved prompt sections meet constraints."""
     violations = []
@@ -509,8 +507,8 @@ def evolve_prompt_section(
     iterations: int = 10,
     optimizer_model: str = "qwen3.6-plus",
     eval_model: str = "qwen3.6-plus",
-    hermes_repo: Optional[str] = None,
-    dataset_path: Optional[str] = None,
+    hermes_repo: str | None = None,
+    dataset_path: str | None = None,
     dry_run: bool = False,
 ):
     """Main function to evolve system prompt sections."""
@@ -524,8 +522,8 @@ def evolve_prompt_section(
     if hermes_repo:
         config.hermes_agent_path = Path(hermes_repo)
 
-    console.print(f"\n[bold cyan]🧬 Hermes Agent Self-Evolution[/bold cyan] — "
-                  f"Evolving system prompt sections\n")
+    console.print("\n[bold cyan]🧬 Hermes Agent Self-Evolution[/bold cyan] — "
+                  "Evolving system prompt sections\n")
 
     # ── 1. Extract current sections ─────────────────────────────────────
     console.print("[bold]Step 1: Extracting prompt sections[/bold]")
@@ -541,12 +539,13 @@ def evolve_prompt_section(
     console.print(f"  Extracted {len(sections)} sections")
 
     if dry_run:
-        console.print(f"\n[bold green]DRY RUN — setup validated.[/bold green]")
+        console.print("\n[bold green]DRY RUN — setup validated.[/bold green]")
         return
 
     # ── 2. Configure DSPy first (MUST be before any ChainOfThought is created) ──
-    console.print(f"\n[bold]Step 2: Configuring DSPy[/bold]")
+    console.print("\n[bold]Step 2: Configuring DSPy[/bold]")
     from dspy.adapters import ChatAdapter
+
     from evolution.core.config import make_dashscope_lm
 
     lm = make_dashscope_lm(eval_model, num_retries=8)
@@ -554,7 +553,7 @@ def evolve_prompt_section(
     console.print(f"  DSPy configured: {eval_model} (ChatAdapter, DashScope)")
 
     # ── 3. Build behavioral test dataset ────────────────────────────────
-    console.print(f"\n[bold]Step 3: Building behavioral test dataset[/bold]")
+    console.print("\n[bold]Step 3: Building behavioral test dataset[/bold]")
 
     dataset_path_obj = Path(dataset_path) if dataset_path else Path("datasets/prompts/behavioral")
 
@@ -571,7 +570,7 @@ def evolve_prompt_section(
         sys.exit(1)
 
     # ── 4. Evaluate baseline behavior ───────────────────────────────────
-    console.print(f"\n[bold]Step 4: Evaluating baseline behavior[/bold]")
+    console.print("\n[bold]Step 4: Evaluating baseline behavior[/bold]")
 
     evaluator = BehavioralEvaluator(config)
     baseline_score, baseline_per_section = evaluator.evaluate(sections, dataset.holdout)
@@ -643,7 +642,7 @@ def evolve_prompt_section(
         elapsed = time.time() - start_time
 
     # ── 6. Evaluate evolved behavior ────────────────────────────────────
-    console.print(f"\n[bold]Step 5: Evaluating evolved behavior[/bold]")
+    console.print("\n[bold]Step 5: Evaluating evolved behavior[/bold]")
 
     if optimized_module and hasattr(optimized_module, 'sections'):
         evolved_sections = list(optimized_module.sections.values())
@@ -654,7 +653,7 @@ def evolve_prompt_section(
     improvement = evolved_score - baseline_score
 
     # ── 7. Validate constraints ─────────────────────────────────────────
-    console.print(f"\n[bold]Step 6: Validating constraints[/bold]")
+    console.print("\n[bold]Step 6: Validating constraints[/bold]")
     violations = validate_prompt_sections(evolved_sections, baseline_sections)
     if violations:
         for v in violations:
