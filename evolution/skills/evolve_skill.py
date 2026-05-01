@@ -288,6 +288,11 @@ def evolve(
     console.print()
     console.print(table)
 
+    # ── 9b. Cost summary ────────────────────────────────────────────────
+    from evolution.core.cost_tracker import tracker
+
+    tracker.print_summary(console)
+
     # ── 10. Save output ─────────────────────────────────────────────────
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir = Path("output") / skill_name / timestamp

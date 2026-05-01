@@ -75,13 +75,14 @@ def get_api_base() -> str:
     return "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
 
-def make_lm(model: str, **kwargs) -> "dspy.LM":
+def make_lm(model: str, track_usage: bool = True, **kwargs) -> "dspy.LM":
     """Create a DSPy LM configured for DashScope / OpenAI-compatible API.
 
     Args:
         model: Model name (e.g., 'qwen3.6-plus', 'qwen-max').
                DSPy's LM accepts the model name and uses the api_base/api_key
                for routing. Using the 'openai/' prefix triggers OpenAI-compatible mode.
+        track_usage: If True, wrap LM to record token usage and estimated cost.
 
     Returns:
         Configured dspy.LM instance.
@@ -92,12 +93,42 @@ def make_lm(model: str, **kwargs) -> "dspy.LM":
     if "/" not in model:
         model = f"openai/{model}"
 
-    return dspy.LM(
+    lm = dspy.LM(
         model=model,
         api_base=get_api_base(),
         api_key=get_api_key(),
         **kwargs,
     )
+
+    if track_usage:
+        _wrap_lm_for_tracking(lm, model)
+
+    return lm
+
+
+def _wrap_lm_for_tracking(lm: "dspy.LM", raw_model: str):
+    """Wrap a DSPy LM to automatically record usage to the cost tracker."""
+    from evolution.core.cost_tracker import tracker
+
+    original_call = lm.__call__
+
+    def tracked_call(*args, **kwargs):
+        result = original_call(*args, **kwargs)
+        try:
+            # DSPy stores usage in lm.history
+            history = getattr(lm, "history", [])
+            if history:
+                last = history[-1]
+                usage = last.get("usage", {})
+                if isinstance(usage, dict):
+                    inp = usage.get("prompt_tokens", 0) or usage.get("input_tokens", 0)
+                    out = usage.get("completion_tokens", 0) or usage.get("output_tokens", 0)
+                    tracker.record(raw_model, inp, out)
+        except Exception:
+            pass  # Don't let tracking break the LM
+        return result
+
+    lm.__call__ = tracked_call
 
 
 def make_dashscope_lm(model: str = "qwen3.6-plus", num_retries: int = 8, **kwargs) -> "dspy.LM":

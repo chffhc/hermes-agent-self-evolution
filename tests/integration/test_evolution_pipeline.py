@@ -82,8 +82,9 @@ class TestConfigIntegration:
         """make_lm should construct a DSPy LM without errors."""
         with patch("evolution.core.config.get_api_key", return_value="sk-test-key"), \
              patch("evolution.core.config.get_api_base", return_value="https://api.test/v1"):
-            from evolution.core.config import make_lm
             import dspy
+
+            from evolution.core.config import make_lm
             lm = make_lm("test-model", temperature=0.0)
             assert isinstance(lm, dspy.LM)
 
@@ -91,8 +92,9 @@ class TestConfigIntegration:
         """make_dashscope_lm delegates to make_lm with model_type='chat'."""
         with patch("evolution.core.config.get_api_key", return_value="sk-test-key"), \
              patch("evolution.core.config.get_api_base", return_value="https://api.test/v1"):
-            from evolution.core.config import make_dashscope_lm
             import dspy
+
+            from evolution.core.config import make_dashscope_lm
             lm = make_dashscope_lm("test-model")
             assert isinstance(lm, dspy.LM)
             assert lm.model.startswith("openai/")
@@ -173,8 +175,8 @@ class TestSkillEvolutionIntegration:
 
     def test_extract_evolved_skill_text_with_sentinels(self):
         """Verify sentinel-based extraction from optimized module."""
+
         from evolution.skills.skill_module import extract_evolved_skill_text
-        import dspy
 
         # Build a mock optimized module with a predictor that has sentinel-wrapped text
         SENTINEL_START = "<!-- __SKILL_EVOLVED_START__ -->"
@@ -222,7 +224,10 @@ class TestToolEvolutionIntegration:
         assert td.description == "A tool for testing"
 
     def test_validate_tool_descriptions_ok(self):
-        from evolution.tools.evolve_tool_descriptions import validate_tool_descriptions, ToolDescription
+        from evolution.tools.evolve_tool_descriptions import (
+            ToolDescription,
+            validate_tool_descriptions,
+        )
         tools = [ToolDescription(
             name="t1", toolset="core", description="Short desc",
             param_descriptions={"p": "short"}, schema={}, file_path="x.py"
@@ -231,7 +236,10 @@ class TestToolEvolutionIntegration:
         assert len(violations) == 0
 
     def test_validate_tool_descriptions_too_long(self):
-        from evolution.tools.evolve_tool_descriptions import validate_tool_descriptions, ToolDescription
+        from evolution.tools.evolve_tool_descriptions import (
+            ToolDescription,
+            validate_tool_descriptions,
+        )
         tools = [ToolDescription(
             name="t1", toolset="core", description="x" * 501,
             param_descriptions={}, schema={}, file_path="x.py"
@@ -241,8 +249,9 @@ class TestToolEvolutionIntegration:
         assert "too long" in violations[0]["violation"].lower()
 
     def test_tool_selection_fitness_correct(self):
-        from evolution.tools.evolve_tool_descriptions import tool_selection_fitness_metric
         import dspy
+
+        from evolution.tools.evolve_tool_descriptions import tool_selection_fitness_metric
 
         example = dspy.Example(correct_tool="read_file").with_inputs("task")
         prediction = dspy.Prediction(selected_tool="read_file")
@@ -250,8 +259,9 @@ class TestToolEvolutionIntegration:
         assert score == 1.0
 
     def test_tool_selection_fitness_incorrect(self):
-        from evolution.tools.evolve_tool_descriptions import tool_selection_fitness_metric
         import dspy
+
+        from evolution.tools.evolve_tool_descriptions import tool_selection_fitness_metric
 
         example = dspy.Example(correct_tool="read_file").with_inputs("task")
         prediction = dspy.Prediction(selected_tool="write_file")
@@ -303,7 +313,7 @@ class TestPromptEvolutionIntegration:
         assert ex.should_not_do is not None
 
     def test_validate_sections_ok(self):
-        from evolution.prompts.evolve_prompt_section import validate_prompt_sections, PromptSection
+        from evolution.prompts.evolve_prompt_section import PromptSection, validate_prompt_sections
         sections = [PromptSection(
             name="TEST", content="some guidance with helpful direct honest keywords",
             file_path="f.py", description="d", max_growth_pct=50, risk_level="low",
@@ -312,7 +322,7 @@ class TestPromptEvolutionIntegration:
         assert len(violations) == 0
 
     def test_validate_empty_section(self):
-        from evolution.prompts.evolve_prompt_section import validate_prompt_sections, PromptSection
+        from evolution.prompts.evolve_prompt_section import PromptSection, validate_prompt_sections
         sections = [PromptSection(
             name="TEST", content="", file_path="f.py",
             description="d", max_growth_pct=20, risk_level="low",
@@ -321,7 +331,7 @@ class TestPromptEvolutionIntegration:
         assert any("empty" in v["violation"].lower() for v in violations)
 
     def test_validate_growth_limit(self):
-        from evolution.prompts.evolve_prompt_section import validate_prompt_sections, PromptSection
+        from evolution.prompts.evolve_prompt_section import PromptSection, validate_prompt_sections
         baseline = [PromptSection(
             name="TEST", content="x" * 100, file_path="f.py",
             description="d", max_growth_pct=20, risk_level="low",
@@ -334,8 +344,9 @@ class TestPromptEvolutionIntegration:
         assert any("growth" in v["violation"].lower() for v in violations)
 
     def test_prompt_section_fitness_metric(self):
-        from evolution.prompts.evolve_prompt_section import prompt_section_fitness_metric
         import dspy
+
+        from evolution.prompts.evolve_prompt_section import prompt_section_fitness_metric
 
         example = dspy.Example(expected_behavior="search memory for past context").with_inputs("scenario")
         prediction = dspy.Prediction(behavior="I will search memory for past context")
@@ -343,8 +354,9 @@ class TestPromptEvolutionIntegration:
         assert score > 0
 
     def test_prompt_section_fitness_empty(self):
-        from evolution.prompts.evolve_prompt_section import prompt_section_fitness_metric
         import dspy
+
+        from evolution.prompts.evolve_prompt_section import prompt_section_fitness_metric
 
         example = dspy.Example(expected_behavior="do the thing").with_inputs("scenario")
         prediction = dspy.Prediction(behavior="")
@@ -398,9 +410,9 @@ class TestCrossPhaseConsistency:
 
     def test_all_phases_importable_together(self):
         """All three evolution modules must co-exist without import errors."""
+        from evolution.prompts.evolve_prompt_section import evolve_prompt_section
         from evolution.skills.evolve_skill import evolve
         from evolution.tools.evolve_tool_descriptions import evolve_tool_descriptions
-        from evolution.prompts.evolve_prompt_section import evolve_prompt_section
         assert callable(evolve)
         assert callable(evolve_tool_descriptions)
         assert callable(evolve_prompt_section)
@@ -408,8 +420,8 @@ class TestCrossPhaseConsistency:
     def test_no_import_from_evolve_skill_for_lm(self):
         """Phase 2 and 3 must import make_dashscope_lm from config, not evolve_skill."""
         # Verify by re-importing the modules and checking their source
-        import evolution.tools.evolve_tool_descriptions as p2
         import evolution.prompts.evolve_prompt_section as p3
+        import evolution.tools.evolve_tool_descriptions as p2
 
         # The modules should import successfully — the import chain is what matters
         assert p2 is not None

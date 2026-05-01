@@ -1,9 +1,6 @@
 """Tests for skill module loading and parsing."""
 
-import pytest
-from pathlib import Path
 from evolution.skills.skill_module import load_skill, reassemble_skill
-
 
 SAMPLE_SKILL = """---
 name: test-skill

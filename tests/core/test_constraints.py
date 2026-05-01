@@ -1,8 +1,9 @@
 """Tests for constraint validators."""
 
 import pytest
-from evolution.core.constraints import ConstraintValidator
+
 from evolution.core.config import EvolutionConfig
+from evolution.core.constraints import ConstraintValidator
 
 
 @pytest.fixture

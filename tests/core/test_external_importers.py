@@ -15,32 +15,30 @@ Tests cover:
 """
 
 import json
-from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from click.testing import CliRunner
 
+from evolution.core.dataset_builder import EvalExample
 from evolution.core.external_importers import (
-    _contains_secret,
-    _is_relevant_to_skill,
-    _parse_scoring_json,
-    _parse_copilot_events,
-    _read_copilot_workspace,
-    _load_skill_text,
-    _validate_eval_example,
-    build_dataset_from_external,
-    main,
+    MIN_DATASET_SIZE,
+    VALID_DIFFICULTIES,
     ClaudeCodeImporter,
     CopilotImporter,
     HermesSessionImporter,
     RelevanceFilter,
-    VALID_DIFFICULTIES,
-    MIN_DATASET_SIZE,
+    _contains_secret,
+    _is_relevant_to_skill,
+    _load_skill_text,
+    _parse_copilot_events,
+    _parse_scoring_json,
+    _read_copilot_workspace,
+    _validate_eval_example,
+    build_dataset_from_external,
+    main,
 )
-from evolution.core.dataset_builder import EvalExample
-
 
 # ── Secret Detection ────────────────────────────────────────────────────────
 

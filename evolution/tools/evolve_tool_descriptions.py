@@ -382,43 +382,77 @@ def validate_tool_descriptions(
 
 # ── Tool description module for DSPy ────────────────────────────────────
 
+_TOOL_SENTINEL_START = "<!-- __TOOL_DESC_START__ -->"
+_TOOL_SENTINEL_END = "<!-- __TOOL_DESC_END__ -->"
+
+
 class ToolDescriptionModule(dspy.Module):
     """DSPy module for optimizing tool descriptions.
 
-    All tool descriptions are parameters that GEPA can mutate.
+    All tool descriptions are embedded in the signature instruction via
+    sentinels, making them optimizable parameters for GEPA (same approach
+    as SkillModule for Phase 1).
     """
-
-    class ToolSelectionTask(dspy.Signature):
-        """Select the best tool for a task given the tool descriptions."""
-        task: str = dspy.InputField(desc="Task to complete")
-        tool_descriptions: str = dspy.InputField(desc="Tool names and descriptions")
-        selected_tool: str = dspy.OutputField(desc="Best tool name")
 
     def __init__(self, tools: list[ToolDescription]):
         super().__init__()
         self.tools = tools
-        self._build_description_string()
-        self.predictor = dspy.ChainOfThought(self.ToolSelectionTask)
+        self._build_signature()
 
-    def _build_description_string(self):
-        self.description_string = json.dumps([
+    def _build_signature(self):
+        descriptions = json.dumps([
             {"name": t.name, "description": t.description}
             for t in self.tools
         ], indent=2, ensure_ascii=False)
 
+        class ToolSelectionTask(dspy.Signature):
+            __doc__ = (
+                "Select the best tool for a task given the tool descriptions.\n"
+                "Read the available tool descriptions carefully and pick the one\n"
+                "whose description best matches the task.\n\n"
+                f"{_TOOL_SENTINEL_START}\n{descriptions}\n{_TOOL_SENTINEL_END}"
+            )
+            task: str = dspy.InputField(desc="Task to complete")
+            selected_tool: str = dspy.OutputField(desc="Best tool name")
+
+        self.predictor = dspy.ChainOfThought(ToolSelectionTask)
+
     def forward(self, task: str) -> dspy.Prediction:
-        result = self.predictor(
-            task=task,
-            tool_descriptions=self.description_string,
-        )
+        result = self.predictor(task=task)
         return dspy.Prediction(selected_tool=result.selected_tool)
 
-    def update_descriptions(self, new_descriptions: dict[str, str]):
-        """Update tool descriptions from evolved values."""
-        for tool in self.tools:
-            if tool.name in new_descriptions:
-                tool.description = new_descriptions[tool.name]
-        self._build_description_string()
+    def get_evolved_tools(self) -> list[ToolDescription]:
+        """Extract evolved tool descriptions from the compiled module."""
+        predictor = getattr(self, "predictor", None)
+        instruction = ""
+
+        for sig_attr in ("extended_signature", "signature"):
+            sig = getattr(predictor, sig_attr, None) if predictor else None
+            if sig is None:
+                continue
+            instruction = getattr(sig, "instructions", None) or getattr(sig, "__doc__", "") or ""
+            if instruction:
+                break
+
+        if not instruction:
+            return self.tools
+
+        start_idx = instruction.find(_TOOL_SENTINEL_START)
+        end_idx = instruction.find(_TOOL_SENTINEL_END)
+        if start_idx == -1 or end_idx == -1:
+            return self.tools
+
+        evolved_json = instruction[start_idx + len(_TOOL_SENTINEL_START):end_idx].strip()
+        try:
+            evolved = json.loads(evolved_json)
+            name_to_desc = {t["name"]: t["description"] for t in evolved if isinstance(t, dict) and "name" in t and "description" in t}
+            for tool in self.tools:
+                if tool.name in name_to_desc:
+                    tool.description = name_to_desc[tool.name]
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+        return self.tools
 
 
 # ── Tool fitness metric ─────────────────────────────────────────────────
@@ -586,8 +620,8 @@ def evolve_tool_descriptions(
     # ── 6. Evaluate evolved accuracy ────────────────────────────────────
     console.print("\n[bold]Step 5: Evaluating evolved tool selection[/bold]")
 
-    if optimized_module and hasattr(optimized_module, 'tools'):
-        evolved_tools = optimized_module.tools
+    if optimized_module and hasattr(optimized_module, 'get_evolved_tools'):
+        evolved_tools = optimized_module.get_evolved_tools()
     else:
         evolved_tools = tools
 
