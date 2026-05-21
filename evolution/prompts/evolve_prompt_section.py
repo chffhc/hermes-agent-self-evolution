@@ -655,6 +655,7 @@ def evolve_prompt_section(
 
         optimizer = dspy.GEPA(
             metric=prompt_section_fitness_metric,
+            max_metric_calls=iterations * 5,
             reflection_lm=reflection_lm,
         )
 
@@ -662,7 +663,6 @@ def evolve_prompt_section(
             module,
             trainset=train_examples,
             valset=val_examples,
-            eval_kwargs={"max_calls": iterations * 5},
         )
 
         elapsed = time.time() - start_time

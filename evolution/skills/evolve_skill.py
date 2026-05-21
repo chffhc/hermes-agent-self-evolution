@@ -171,15 +171,14 @@ def evolve(
 
         optimizer = dspy.GEPA(
             metric=judge_metric,
+            max_metric_calls=iterations * 5,
             reflection_lm=reflection_lm,
         )
 
-        # Control budget via compile() kwargs
         optimized_module = optimizer.compile(
             baseline_module,
             trainset=trainset,
             valset=valset,
-            eval_kwargs={"max_calls": iterations * 5},
         )
     except Exception as e:
         # Fall back to MIPROv2 if GEPA isn't available in this DSPy version

@@ -587,6 +587,7 @@ def evolve_tool_descriptions(
 
         optimizer = dspy.GEPA(
             metric=tool_selection_fitness_metric,
+            max_metric_calls=iterations * 5,
             reflection_lm=reflection_lm,
         )
 
@@ -594,7 +595,6 @@ def evolve_tool_descriptions(
             module,
             trainset=train_examples,
             valset=val_examples,
-            eval_kwargs={"max_calls": iterations * 5},
         )
 
         elapsed = time.time() - start_time
