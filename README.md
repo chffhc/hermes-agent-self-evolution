@@ -57,9 +57,16 @@ python -m evolution.prompts.evolve_prompt_section \
     --section MEMORY_GUIDANCE \
     --iterations 10
 
-# Phase 4: Evolve tool code (uses Darwinian Evolver CLI)
+# Phase 4: Evolve tool code with OpenEvolve in patch-only mode
 python -m evolution.code.evolve_tool_code \
     --tool file_tools \
+    --engine openevolve \
+    --iterations 3
+
+# Research fallback: Darwinian Evolver external CLI
+python -m evolution.code.evolve_tool_code \
+    --tool file_tools \
+    --engine darwinian \
     --iterations 10
 
 # Phase 5: Continuous improvement cycle
@@ -73,7 +80,7 @@ python -m evolution.monitor.continuous_evolution --cycle
 | **Phase 1** | Skill files (SKILL.md) | DSPy + GEPA | ✅ Implemented |
 | **Phase 2** | Tool descriptions | DSPy + GEPA | ✅ Implemented |
 | **Phase 3** | System prompt sections | DSPy + GEPA | ✅ Implemented |
-| **Phase 4** | Tool implementation code | Darwinian Evolver | ✅ Implemented |
+| **Phase 4** | Tool implementation code | OpenEvolve (primary), Darwinian Evolver (research fallback) | ✅ Runner prototype |
 | **Phase 5** | Continuous improvement loop | Automated pipeline | ✅ Implemented |
 
 ## Engines
@@ -81,7 +88,8 @@ python -m evolution.monitor.continuous_evolution --cycle
 | Engine | What It Does | License |
 |--------|-------------|---------|
 | **[DSPy](https://github.com/stanfordnlp/dspy) + [GEPA](https://github.com/gepa-ai/gepa)** | Reflective prompt evolution — reads execution traces, proposes targeted mutations | MIT |
-| **[Darwinian Evolver](https://github.com/imbue-ai/darwinian_evolver)** | Code evolution with Git-based organisms | AGPL v3 (external CLI only) |
+| **[OpenEvolve](https://github.com/algorithmicsuperintelligence/openevolve)** | Code evolution from an initial program + evaluator; used in isolated scratch/worktree mode and returns patch artifacts only | Apache-2.0 |
+| **[Darwinian Evolver](https://github.com/imbue-ai/darwinian_evolver)** | Code evolution with Git-based organisms; research fallback only | AGPL v3 (external CLI only) |
 
 ## Guardrails
 

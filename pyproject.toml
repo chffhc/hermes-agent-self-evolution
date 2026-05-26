@@ -30,6 +30,9 @@ dev = [
 darwinian = [
     "darwinian-evolver",
 ]
+openevolve = [
+    "openevolve>=0.2.27",
+]
 
 [project.urls]
 Homepage = "https://github.com/NousResearch/hermes-agent-self-evolution"
