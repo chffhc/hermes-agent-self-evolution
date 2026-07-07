@@ -100,6 +100,7 @@ class SkillModule(dspy.Module):
 
     def __init__(self, skill_text: str):
         super().__init__()
+
         # Dynamically create a Signature with the skill text as its instruction.
         # This makes the skill text an optimizable parameter rather than a static input.
         class TaskWithSkill(dspy.Signature):
@@ -142,7 +143,11 @@ def extract_evolved_skill_text(optimized_module: dspy.Module) -> str:
         for attr_name in dir(predictor):
             attr = getattr(predictor, attr_name, None)
             if isinstance(attr, dspy.Predict) and hasattr(attr, "signature"):
-                instruction = getattr(attr.signature, "instructions", None) or getattr(attr.signature, "__doc__", "") or ""
+                instruction = (
+                    getattr(attr.signature, "instructions", None)
+                    or getattr(attr.signature, "__doc__", "")
+                    or ""
+                )
                 if instruction:
                     break
 
@@ -162,7 +167,7 @@ def extract_evolved_skill_text(optimized_module: dspy.Module) -> str:
             f"Instruction preview: {instruction[:300]}"
         )
 
-    evolved_body = instruction[start_idx + len(_SENTINEL_START):end_idx].strip()
+    evolved_body = instruction[start_idx + len(_SENTINEL_START) : end_idx].strip()
     return evolved_body
 
 

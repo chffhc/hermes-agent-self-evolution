@@ -7,6 +7,7 @@ All evolved changes go through PR — never direct commit.
 """
 
 import difflib
+import re
 import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -16,6 +17,7 @@ from pathlib import Path
 @dataclass
 class PRChange:
     """A single file change in the PR."""
+
     file_path: str  # Relative path in hermes-agent repo
     original_content: str
     evolved_content: str
@@ -25,6 +27,7 @@ class PRChange:
 @dataclass
 class PRMetrics:
     """Metrics to include in the PR body."""
+
     baseline_score: float
     evolved_score: float
     holdout_score: float
@@ -45,6 +48,7 @@ class PRMetrics:
 @dataclass
 class PRResult:
     """Result of creating a PR."""
+
     success: bool
     branch_name: str
     pr_url: str | None = None
@@ -79,20 +83,24 @@ class PRBuilder:
         """
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         change_names = _extract_change_names(changes)
-        branch_name = f"{title_prefix}/{'-'.join(change_names)}-{timestamp}"
+        branch_name = _safe_branch_name(title_prefix, change_names, timestamp)
 
-        # Ensure we're in a clean state
         try:
-            self._run_git(["checkout", "main"], cwd=self.hermes_agent_path)
-            self._run_git(["pull", "origin", "main"], cwd=self.hermes_agent_path)
+            self._ensure_git_repo()
+            self._ensure_clean_worktree()
         except subprocess.CalledProcessError as e:
             return PRResult(
                 success=False,
                 branch_name=branch_name,
-                error=f"Failed to checkout main: {e.stderr}",
+                error=f"Repository preflight failed: {e.stderr or e.stdout}",
             )
+        except ValueError as e:
+            return PRResult(success=False, branch_name=branch_name, error=str(e))
 
-        # Create new branch
+        original_branch = self._current_branch()
+
+        # Create new branch from the current clean HEAD. Do not checkout/pull main
+        # implicitly: that can discard or mix user work in a fork/local checkout.
         try:
             self._run_git(
                 ["checkout", "-b", branch_name],
@@ -112,10 +120,18 @@ class PRBuilder:
             # Path traversal guard: ensure target stays within hermes-agent repo
             repo_resolved = self.hermes_agent_path.resolve()
             if not target_path.is_relative_to(repo_resolved):
+                self._rollback_branch(original_branch, branch_name)
                 return PRResult(
                     success=False,
                     branch_name=branch_name,
                     error=f"Path traversal detected: {change.file_path} escapes repo directory",
+                )
+            if target_path.is_symlink():
+                self._rollback_branch(original_branch, branch_name)
+                return PRResult(
+                    success=False,
+                    branch_name=branch_name,
+                    error=f"Refusing to overwrite symlink: {change.file_path}",
                 )
             target_path.parent.mkdir(parents=True, exist_ok=True)
             target_path.write_text(change.evolved_content, encoding="utf-8")
@@ -130,6 +146,7 @@ class PRBuilder:
             self._run_git(["add"] + files_changed, cwd=self.hermes_agent_path)
             self._run_git(["commit", "-m", commit_msg], cwd=self.hermes_agent_path)
         except subprocess.CalledProcessError as e:
+            self._rollback_branch(original_branch, branch_name)
             return PRResult(
                 success=False,
                 branch_name=branch_name,
@@ -165,6 +182,7 @@ class PRBuilder:
             else:
                 # gh CLI failed — branch is still created, log the error
                 import logging
+
                 logging.getLogger(__name__).warning(
                     "gh pr create failed: %s", pr_output.stderr.strip()
                 )
@@ -202,9 +220,7 @@ class PRBuilder:
 
         return "\n".join(lines)
 
-    def _build_commit_message(
-        self, changes: list[PRChange], metrics: PRMetrics
-    ) -> str:
+    def _build_commit_message(self, changes: list[PRChange], metrics: PRMetrics) -> str:
         """Build a detailed git commit message."""
         change_names = _extract_change_names(changes)
         names_str = ", ".join(change_names)
@@ -259,9 +275,7 @@ class PRBuilder:
         )
 
         if metrics.constraint_violations:
-            body += (
-                "### Constraint Violations (filtered during evolution)\n\n"
-            )
+            body += "### Constraint Violations (filtered during evolution)\n\n"
             for v in metrics.constraint_violations:
                 body += f"- {v}\n"
             body += "\n"
@@ -284,25 +298,84 @@ class PRBuilder:
 
         return body
 
+    def _ensure_git_repo(self) -> None:
+        result = self._run_git(
+            ["rev-parse", "--show-toplevel"],
+            cwd=self.hermes_agent_path,
+            capture_output=True,
+        )
+        if result.returncode != 0:
+            raise subprocess.CalledProcessError(
+                result.returncode, result.args, result.stdout, result.stderr
+            )
+        repo_root = Path(result.stdout.strip()).resolve()
+        if repo_root != self.hermes_agent_path.resolve():
+            raise ValueError(
+                f"hermes_agent_path must be the git repo root; got {self.hermes_agent_path}, root is {repo_root}"
+            )
+
+    def _ensure_clean_worktree(self) -> None:
+        result = self._run_git(
+            ["status", "--porcelain"],
+            cwd=self.hermes_agent_path,
+            capture_output=True,
+        )
+        if result.returncode != 0:
+            raise subprocess.CalledProcessError(
+                result.returncode, result.args, result.stdout, result.stderr
+            )
+        if result.stdout.strip():
+            raise ValueError(
+                "Refusing to create PR from a dirty worktree. Commit/stash local changes "
+                "or run PRBuilder in an isolated worktree."
+            )
+
+    def _current_branch(self) -> str:
+        result = self._run_git(
+            ["branch", "--show-current"],
+            cwd=self.hermes_agent_path,
+            capture_output=True,
+        )
+        if result.returncode != 0:
+            raise subprocess.CalledProcessError(
+                result.returncode, result.args, result.stdout, result.stderr
+            )
+        return result.stdout.strip()
+
+    def _rollback_branch(self, original_branch: str, branch_name: str) -> None:
+        """Best-effort rollback when applying changes fails before commit."""
+        if original_branch:
+            self._run_git(["checkout", original_branch], cwd=self.hermes_agent_path, check=False)
+        self._run_git(["branch", "-D", branch_name], cwd=self.hermes_agent_path, check=False)
+
     def _run_git(
         self,
         args: list[str],
         cwd: Path,
         capture_output: bool = False,
+        check: bool = True,
     ) -> subprocess.CompletedProcess:
         """Run a git command."""
         cmd = ["git"] + args
         result = subprocess.run(
             cmd,
             cwd=str(cwd),
-            capture_output=capture_output,
+            capture_output=True,
             text=True,
         )
-        if result.returncode != 0 and not capture_output:
+        if check and result.returncode != 0 and not capture_output:
             raise subprocess.CalledProcessError(
                 result.returncode, cmd, result.stdout, result.stderr
             )
         return result
+
+
+def _safe_branch_name(title_prefix: str, change_names: list[str], timestamp: str) -> str:
+    raw = f"{title_prefix}/{'-'.join(change_names)}-{timestamp}"
+    safe = re.sub(r"[^A-Za-z0-9._/-]+", "-", raw).strip("-./")
+    parts = [part for part in re.split(r"/+", safe) if part and part not in {".", ".."}]
+    safe = "/".join(parts).replace("..", ".")
+    return safe[:240] or f"evolve/artifact-{timestamp}"
 
 
 def _extract_change_names(changes: list[PRChange]) -> list[str]:

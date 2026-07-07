@@ -24,7 +24,7 @@ import dspy
 from rich.console import Console
 from rich.table import Table
 
-from evolution.core.config import EvolutionConfig
+from evolution.core.config import EvolutionConfig, resolve_hermes_agent_path
 from evolution.core.utils import parse_json_array
 
 console = Console()
@@ -32,9 +32,11 @@ console = Console()
 
 # ── Data structures ─────────────────────────────────────────────────────
 
+
 @dataclass
 class ToolDescription:
     """A tool's description and parameter descriptions."""
+
     name: str
     toolset: str
     description: str  # Main tool description
@@ -46,6 +48,7 @@ class ToolDescription:
 @dataclass
 class ToolSelectionExample:
     """A single tool selection test case."""
+
     task_description: str
     correct_tool: str
     correct_params: dict  # Which params would be used (for validation)
@@ -56,6 +59,7 @@ class ToolSelectionExample:
 @dataclass
 class ToolEvalDataset:
     """Dataset for tool selection evaluation."""
+
     examples: list[ToolSelectionExample]
     train: list[ToolSelectionExample] = field(default_factory=list)
     val: list[ToolSelectionExample] = field(default_factory=list)
@@ -64,14 +68,15 @@ class ToolEvalDataset:
     def split(self, train_ratio: float = 0.6, val_ratio: float = 0.2):
         """Split examples into train/val/holdout."""
         import random
+
         random.seed(42)
         random.shuffle(self.examples)
         n = len(self.examples)
         n_train = max(1, int(n * train_ratio))
         n_val = max(1, int(n * val_ratio))
         self.train = self.examples[:n_train]
-        self.val = self.examples[n_train:n_train + n_val]
-        self.holdout = self.examples[n_train + n_val:]
+        self.val = self.examples[n_train : n_train + n_val]
+        self.holdout = self.examples[n_train + n_val :]
 
     def save(self, path: Path):
         path.mkdir(parents=True, exist_ok=True)
@@ -114,6 +119,7 @@ class ToolEvalDataset:
 
 # ── Tool description extractor ──────────────────────────────────────────
 
+
 def extract_tool_descriptions(
     hermes_agent_path: Path,
 ) -> list[ToolDescription]:
@@ -147,14 +153,16 @@ def extract_tool_descriptions(
             # Find source file
             source_file = _find_tool_source(hermes_agent_path, tool_name)
 
-            descriptions.append(ToolDescription(
-                name=tool_name,
-                toolset=entry.toolset,
-                description=desc,
-                param_descriptions=param_descs,
-                schema=schema,
-                file_path=source_file,
-            ))
+            descriptions.append(
+                ToolDescription(
+                    name=tool_name,
+                    toolset=entry.toolset,
+                    description=desc,
+                    param_descriptions=param_descs,
+                    schema=schema,
+                    file_path=source_file,
+                )
+            )
 
         return descriptions
     finally:
@@ -179,6 +187,7 @@ def _find_tool_source(hermes_agent_path: Path, tool_name: str) -> str:
 
 
 # ── Tool selection dataset builder ──────────────────────────────────────
+
 
 class ToolSelectionDatasetBuilder:
     """Generates tool selection evaluation datasets.
@@ -205,6 +214,7 @@ class ToolSelectionDatasetBuilder:
         - reasoning: Why this tool is the best choice
         - difficulty: easy/medium/hard
         """
+
         tools_json: str = dspy.InputField(desc="JSON array of tool descriptions")
         tool_selection_examples_json: str = dspy.OutputField(
             desc="JSON array of tool selection examples"
@@ -228,16 +238,20 @@ class ToolSelectionDatasetBuilder:
         all_examples = []
 
         for i in range(0, len(tools), batch_size):
-            batch = tools[i:i + batch_size]
-            tools_json = json.dumps([
-                {
-                    "name": t.name,
-                    "toolset": t.toolset,
-                    "description": t.description,
-                    "params": list(t.param_descriptions.keys()),
-                }
-                for t in batch
-            ], indent=2, ensure_ascii=False)
+            batch = tools[i : i + batch_size]
+            tools_json = json.dumps(
+                [
+                    {
+                        "name": t.name,
+                        "toolset": t.toolset,
+                        "description": t.description,
+                        "params": list(t.param_descriptions.keys()),
+                    }
+                    for t in batch
+                ],
+                indent=2,
+                ensure_ascii=False,
+            )
 
             console.print(
                 f"  Generating examples for tools "
@@ -248,13 +262,15 @@ class ToolSelectionDatasetBuilder:
                 result = self.generator(tools_json=tools_json)
                 examples_json = parse_json_array(result.tool_selection_examples_json)
                 for ex in examples_json:
-                    all_examples.append(ToolSelectionExample(
-                        task_description=ex.get("task_description", ""),
-                        correct_tool=ex.get("correct_tool", ""),
-                        correct_params=ex.get("correct_params", {}),
-                        reasoning=ex.get("reasoning", ""),
-                        difficulty=ex.get("difficulty", "easy"),
-                    ))
+                    all_examples.append(
+                        ToolSelectionExample(
+                            task_description=ex.get("task_description", ""),
+                            correct_tool=ex.get("correct_tool", ""),
+                            correct_params=ex.get("correct_params", {}),
+                            reasoning=ex.get("reasoning", ""),
+                            difficulty=ex.get("difficulty", "easy"),
+                        )
+                    )
             except Exception as e:
                 console.print(f"  ⚠ Batch failed: {e}")
 
@@ -272,8 +288,8 @@ class ToolSelectionDatasetBuilder:
         return dataset
 
 
-
 # ── Tool selection evaluator ────────────────────────────────────────────
+
 
 class ToolSelectionEvaluator:
     """Evaluates tool selection accuracy given a set of tool descriptions.
@@ -288,13 +304,12 @@ class ToolSelectionEvaluator:
         You are an AI agent that needs to pick the right tool for a task.
         Read the available tool descriptions carefully and select the best one.
         """
+
         task_description: str = dspy.InputField(desc="The task to complete")
         available_tools_json: str = dspy.InputField(
             desc="JSON array of available tools with names and descriptions"
         )
-        selected_tool: str = dspy.OutputField(
-            desc="The name of the best tool for this task"
-        )
+        selected_tool: str = dspy.OutputField(desc="The name of the best tool for this task")
         reasoning: str = dspy.OutputField(
             desc="Brief explanation of why this tool is the best choice"
         )
@@ -314,10 +329,11 @@ class ToolSelectionEvaluator:
             (overall_accuracy, per_tool_accuracy)
         """
         # Build tool descriptions JSON for the evaluator
-        tools_json = json.dumps([
-            {"name": t.name, "description": t.description}
-            for t in tools
-        ], indent=2, ensure_ascii=False)
+        tools_json = json.dumps(
+            [{"name": t.name, "description": t.description} for t in tools],
+            indent=2,
+            ensure_ascii=False,
+        )
 
         correct = 0
         total = len(examples)
@@ -345,14 +361,14 @@ class ToolSelectionEvaluator:
 
         overall_accuracy = correct / max(1, total)
         per_tool_accuracy = {
-            tool: per_tool_correct.get(tool, 0) / per_tool_total[tool]
-            for tool in per_tool_total
+            tool: per_tool_correct.get(tool, 0) / per_tool_total[tool] for tool in per_tool_total
         }
 
         return overall_accuracy, per_tool_accuracy
 
 
 # ── Tool description constraint validator ───────────────────────────────
+
 
 def validate_tool_descriptions(
     tools: list[ToolDescription],
@@ -367,16 +383,20 @@ def validate_tool_descriptions(
     violations = []
     for tool in tools:
         if len(tool.description) > 500:
-            violations.append({
-                "tool": tool.name,
-                "violation": f"Description too long: {len(tool.description)} chars (max 500)",
-            })
+            violations.append(
+                {
+                    "tool": tool.name,
+                    "violation": f"Description too long: {len(tool.description)} chars (max 500)",
+                }
+            )
         for param, desc in tool.param_descriptions.items():
             if len(desc) > 200:
-                violations.append({
-                    "tool": tool.name,
-                    "violation": f"Param '{param}' description too long: {len(desc)} chars (max 200)",
-                })
+                violations.append(
+                    {
+                        "tool": tool.name,
+                        "violation": f"Param '{param}' description too long: {len(desc)} chars (max 200)",
+                    }
+                )
     return violations
 
 
@@ -400,10 +420,11 @@ class ToolDescriptionModule(dspy.Module):
         self._build_signature()
 
     def _build_signature(self):
-        descriptions = json.dumps([
-            {"name": t.name, "description": t.description}
-            for t in self.tools
-        ], indent=2, ensure_ascii=False)
+        descriptions = json.dumps(
+            [{"name": t.name, "description": t.description} for t in self.tools],
+            indent=2,
+            ensure_ascii=False,
+        )
 
         class ToolSelectionTask(dspy.Signature):
             __doc__ = (
@@ -435,27 +456,35 @@ class ToolDescriptionModule(dspy.Module):
                 break
 
         if not instruction:
-            return self.tools
+            raise ValueError("Cannot find instruction in optimized tool description module")
 
         start_idx = instruction.find(_TOOL_SENTINEL_START)
         end_idx = instruction.find(_TOOL_SENTINEL_END)
         if start_idx == -1 or end_idx == -1:
-            return self.tools
+            raise ValueError(
+                "Cannot find tool description sentinels in evolved instruction. "
+                f"Instruction preview: {instruction[:300]}"
+            )
 
-        evolved_json = instruction[start_idx + len(_TOOL_SENTINEL_START):end_idx].strip()
+        evolved_json = instruction[start_idx + len(_TOOL_SENTINEL_START) : end_idx].strip()
         try:
             evolved = json.loads(evolved_json)
-            name_to_desc = {t["name"]: t["description"] for t in evolved if isinstance(t, dict) and "name" in t and "description" in t}
+            name_to_desc = {
+                t["name"]: t["description"]
+                for t in evolved
+                if isinstance(t, dict) and "name" in t and "description" in t
+            }
             for tool in self.tools:
                 if tool.name in name_to_desc:
                     tool.description = name_to_desc[tool.name]
-        except (json.JSONDecodeError, KeyError):
-            pass
+        except (json.JSONDecodeError, KeyError, TypeError) as e:
+            raise ValueError(f"Cannot parse evolved tool description JSON: {e}") from e
 
         return self.tools
 
 
 # ── Tool fitness metric ─────────────────────────────────────────────────
+
 
 def tool_selection_fitness_metric(
     example: dspy.Example,
@@ -476,6 +505,7 @@ def tool_selection_fitness_metric(
 
 # ── Main evolution function ─────────────────────────────────────────────
 
+
 def evolve_tool_descriptions(
     iterations: int = 10,
     optimizer_model: str = "qwen3.6-plus",
@@ -487,29 +517,31 @@ def evolve_tool_descriptions(
 ):
     """Main function to evolve tool descriptions."""
 
+    hermes_agent_path = resolve_hermes_agent_path(hermes_repo)
     config = EvolutionConfig(
+        hermes_agent_path=hermes_agent_path,
         iterations=iterations,
         optimizer_model=optimizer_model,
         eval_model=eval_model,
         judge_model=eval_model,
     )
-    if hermes_repo:
-        config.hermes_agent_path = Path(hermes_repo)
 
-    console.print("\n[bold cyan]🧬 Hermes Agent Self-Evolution[/bold cyan] — "
-                  "Evolving tool descriptions\n")
+    console.print(
+        "\n[bold cyan]🧬 Hermes Agent Self-Evolution[/bold cyan] — " "Evolving tool descriptions\n"
+    )
 
     # ── 1. Extract current tool descriptions ────────────────────────────
     console.print("[bold]Step 1: Extracting tool descriptions[/bold]")
-    all_tools = extract_tool_descriptions(config.hermes_agent_path)
+    all_tools = extract_tool_descriptions(hermes_agent_path)
 
     if tool_filter:
         tools = [t for t in all_tools if t.name in tool_filter]
         console.print(f"  Filtered to {len(tools)} tools: {', '.join(t.name for t in tools)}")
     else:
         tools = all_tools
-        console.print(f"  Found {len(tools)} tools across "
-                      f"{len({t.toolset for t in tools})} toolsets")
+        console.print(
+            f"  Found {len(tools)} tools across " f"{len({t.toolset for t in tools})} toolsets"
+        )
 
     # Print summary
     for t in tools[:10]:
@@ -552,38 +584,42 @@ def evolve_tool_descriptions(
     evaluator = ToolSelectionEvaluator(config)
 
     baseline_accuracy, baseline_per_tool = evaluator.evaluate(tools, dataset.holdout)
-    console.print(f"  Baseline accuracy: {baseline_accuracy:.1%} "
-                  f"({len(dataset.holdout)} holdout examples)")
+    console.print(
+        f"  Baseline accuracy: {baseline_accuracy:.1%} "
+        f"({len(dataset.holdout)} holdout examples)"
+    )
 
     # ── 4. Save baseline descriptions for comparison ────────────────────
     baseline_descriptions = {t.name: t.description for t in tools}
 
     # ── 5. Run GEPA optimization ────────────────────────────────────────
-    console.print(f"\n[bold cyan]Step 5: Running GEPA optimization ({iterations} iterations)[/bold cyan]\n")
+    console.print(
+        f"\n[bold cyan]Step 5: Running GEPA optimization ({iterations} iterations)[/bold cyan]\n"
+    )
 
     start_time = time.time()
     optimized_module = None
 
+    # Create DSPy examples before the optimizer branch so the MIPRO fallback
+    # cannot reference locals that failed inside the GEPA setup.
+    train_examples = [
+        dspy.Example(
+            task=ex.task_description,
+            correct_tool=ex.correct_tool,
+        ).with_inputs("task")
+        for ex in dataset.train
+    ]
+    val_examples = [
+        dspy.Example(
+            task=ex.task_description,
+            correct_tool=ex.correct_tool,
+        ).with_inputs("task")
+        for ex in dataset.val
+    ]
+    module = ToolDescriptionModule(tools)
+
     try:
         reflection_lm = make_dashscope_lm(optimizer_model, num_retries=8, temperature=1.0)
-
-        # Create DSPy examples
-        train_examples = [
-            dspy.Example(
-                task=ex.task_description,
-                correct_tool=ex.correct_tool,
-            ).with_inputs("task")
-            for ex in dataset.train
-        ]
-        val_examples = [
-            dspy.Example(
-                task=ex.task_description,
-                correct_tool=ex.correct_tool,
-            ).with_inputs("task")
-            for ex in dataset.val
-        ]
-
-        module = ToolDescriptionModule(tools)
 
         optimizer = dspy.GEPA(
             metric=tool_selection_fitness_metric,
@@ -620,8 +656,16 @@ def evolve_tool_descriptions(
     # ── 6. Evaluate evolved accuracy ────────────────────────────────────
     console.print("\n[bold]Step 5: Evaluating evolved tool selection[/bold]")
 
-    if optimized_module and hasattr(optimized_module, 'get_evolved_tools'):
-        evolved_tools = optimized_module.get_evolved_tools()
+    if optimized_module and hasattr(optimized_module, "get_evolved_tools"):
+        try:
+            evolved_tools = optimized_module.get_evolved_tools()
+        except ValueError as e:
+            output_dir = Path("output/tool_descriptions") / "extraction_FAILED"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            (output_dir / "error.txt").write_text(str(e), encoding="utf-8")
+            console.print(f"[red]✗ Could not extract evolved tool descriptions: {e}[/red]")
+            console.print(f"  Saved extraction error to {output_dir}/error.txt")
+            sys.exit(1)
     else:
         evolved_tools = tools
 

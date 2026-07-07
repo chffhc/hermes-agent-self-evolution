@@ -24,21 +24,23 @@ from pathlib import Path
 import click
 from rich.console import Console
 
-from evolution.core.config import get_hermes_agent_path
 from evolution.code.openevolve_runner import (
     OpenEvolveRunnerConfig,
     OpenEvolveRunResult,
     run_openevolve_isolated,
 )
+from evolution.core.config import get_hermes_agent_path
 
 console = Console()
 
 
 # ── Data structures ─────────────────────────────────────────────────────
 
+
 @dataclass
 class CodeOrganism:
     """A tool file mapped to a Darwinian Evolver organism."""
+
     name: str
     file_path: Path  # Absolute path to the tool file
     description: str
@@ -50,6 +52,7 @@ class CodeOrganism:
 @dataclass
 class BugReproduction:
     """A bug reproduction test case."""
+
     issue_number: int
     description: str
     reproduction_script: str  # Python code that triggers the bug
@@ -60,6 +63,7 @@ class BugReproduction:
 @dataclass
 class CodeEvolutionResult:
     """Result of a code evolution run."""
+
     tool_name: str
     iterations: int
     bugs_fixed: list[int]
@@ -80,6 +84,7 @@ class OpenEvolveToolScaffold:
 
 
 # ── Code-as-organism wrapper ────────────────────────────────────────────
+
 
 def wrap_tool_as_organism(
     tool_name: str,
@@ -150,6 +155,7 @@ def wrap_tool_as_organism(
 
 # ── Test-driven fitness function ────────────────────────────────────────
 
+
 def run_pytest_for_tool(
     tool_name: str,
     hermes_agent_path: Path,
@@ -160,12 +166,18 @@ def run_pytest_for_tool(
     Returns (passed, output).
     """
     if test_files:
-        cmd = ["python", "-m", "pytest"] + test_files + ["-v", "--tb=short"]
+        cmd = [sys.executable, "-m", "pytest"] + test_files + ["-v", "--tb=short"]
     else:
         # Run all tests that mention the tool name
         cmd = [
-            "python", "-m", "pytest",
-            "tests/", "-k", tool_name, "-v", "--tb=short",
+            sys.executable,
+            "-m",
+            "pytest",
+            "tests/",
+            "-k",
+            tool_name,
+            "-v",
+            "--tb=short",
         ]
 
     try:
@@ -252,9 +264,7 @@ def evaluate_code_fitness(
             # Basic quality checks
             has_error_handling = "try:" in content or "except" in content
             has_logging = "logger." in content or "logging." in content
-            scores["code_quality"] = (
-                0.5 + 0.25 * has_error_handling + 0.25 * has_logging
-            )
+            scores["code_quality"] = 0.5 + 0.25 * has_error_handling + 0.25 * has_logging
         except Exception:
             scores["code_quality"] = 0.0
     else:
@@ -266,6 +276,7 @@ def evaluate_code_fitness(
 
 
 # ── Safety guardrails ───────────────────────────────────────────────────
+
 
 def validate_code_constraints(
     tool_name: str,
@@ -293,45 +304,58 @@ def validate_code_constraints(
             continue
 
     if not tool_file:
-        violations.append({
-            "tool": tool_name,
-            "violation": "Tool file not found",
-        })
+        violations.append(
+            {
+                "tool": tool_name,
+                "violation": "Tool file not found",
+            }
+        )
         return violations
 
     try:
         content = tool_file.read_text()
     except Exception as e:
-        violations.append({
-            "tool": tool_name,
-            "violation": f"Cannot read file: {e}",
-        })
+        violations.append(
+            {
+                "tool": tool_name,
+                "violation": f"Cannot read file: {e}",
+            }
+        )
         return violations
 
     # Check for registry.register() call
-    if "registry.register" not in content and original_file and "registry.register" in original_file:
-        violations.append({
-            "tool": tool_name,
-            "violation": "registry.register() call removed — would break tool discovery",
-        })
+    if (
+        "registry.register" not in content
+        and original_file
+        and "registry.register" in original_file
+    ):
+        violations.append(
+            {
+                "tool": tool_name,
+                "violation": "registry.register() call removed — would break tool discovery",
+            }
+        )
 
     # Check error handling
     try_count = content.count("try:")
     if original_file:
         original_try = original_file.count("try:")
         if try_count < original_try:
-            violations.append({
-                "tool": tool_name,
-                "violation": (
-                    f"Error handling decreased: {try_count} try blocks vs "
-                    f"{original_try} in original"
-                ),
-            })
+            violations.append(
+                {
+                    "tool": tool_name,
+                    "violation": (
+                        f"Error handling decreased: {try_count} try blocks vs "
+                        f"{original_try} in original"
+                    ),
+                }
+            )
 
     return violations
 
 
 # ── Darwinian Evolver integration ───────────────────────────────────────
+
 
 def run_darwinian_evolver(
     organism_path: Path,
@@ -356,7 +380,10 @@ def run_darwinian_evolver(
         if result.returncode != 0:
             return False, "darwinian-evolver CLI not found or not working"
     except FileNotFoundError:
-        return False, "darwinian-evolver CLI not installed. Install with: pip install darwinian-evolver"
+        return (
+            False,
+            "darwinian-evolver CLI not installed. Install with: pip install darwinian-evolver",
+        )
     except Exception as e:
         return False, f"Failed to check darwinian-evolver: {e}"
 
@@ -364,9 +391,12 @@ def run_darwinian_evolver(
     cmd = [
         "darwinian-evolver",
         "run",
-        "--organism", str(organism_path),
-        "--generations", str(iterations),
-        "--fitness", "pytest",  # Use pytest as fitness function
+        "--organism",
+        str(organism_path),
+        "--generations",
+        str(iterations),
+        "--fitness",
+        "pytest",  # Use pytest as fitness function
     ]
 
     if work_dir:
@@ -389,6 +419,7 @@ def run_darwinian_evolver(
 
 
 # ── OpenEvolve integration ───────────────────────────────────────────────
+
 
 def create_openevolve_tool_scaffold(
     organism: CodeOrganism,
@@ -420,7 +451,7 @@ def create_openevolve_tool_scaffold(
     )
 
     evaluator.write_text(
-        "\"\"\"Safety-first evaluator scaffold for Hermes tool evolution.\"\"\"\n"
+        '"""Safety-first evaluator scaffold for Hermes tool evolution."""\n'
         "from __future__ import annotations\n\n"
         "import py_compile\n"
         "from pathlib import Path\n\n"
@@ -542,13 +573,14 @@ def run_openevolve_tool_evolution(
 
 # ── Main evolution function ─────────────────────────────────────────────
 
+
 def evolve_tool_code(
     tool_name: str,
     iterations: int = 10,
     bug_issue: int | None = None,
     hermes_repo: str | None = None,
     dry_run: bool = False,
-    engine: str = "darwinian",
+    engine: str = "openevolve",
     output_root: str | None = None,
     openevolve_cmd: str = "openevolve-run",
 ):
@@ -559,9 +591,16 @@ def evolve_tool_code(
     if engine not in {"darwinian", "openevolve"}:
         raise ValueError("engine must be one of: darwinian, openevolve")
 
-    console.print(f"\n[bold cyan]🧬 Hermes Agent Self-Evolution[/bold cyan] — "
-                  f"Evolving tool code: [bold]{tool_name}[/bold]")
+    console.print(
+        f"\n[bold cyan]🧬 Hermes Agent Self-Evolution[/bold cyan] — "
+        f"Evolving tool code: [bold]{tool_name}[/bold]"
+    )
     console.print(f"Engine: {engine}\n")
+    if engine == "darwinian":
+        console.print(
+            "[bold yellow]⚠ Darwinian mode can mutate the target Hermes checkout in place. "
+            "Prefer the default openevolve engine unless running in an isolated worktree.[/bold yellow]"
+        )
 
     # ── 1. Wrap tool as organism ────────────────────────────────────────
     console.print("[bold]Step 1: Wrapping tool as organism[/bold]")
@@ -606,15 +645,15 @@ def evolve_tool_code(
     tests_passed, test_output = run_pytest_for_tool(tool_name, hermes_agent_path)
     console.print(f"  Tests: {'✓ Passed' if tests_passed else '✗ Failed'}")
 
-    baseline_fitness, baseline_scores = evaluate_code_fitness(
-        tool_name, hermes_agent_path
-    )
+    baseline_fitness, baseline_scores = evaluate_code_fitness(tool_name, hermes_agent_path)
     console.print(f"  Baseline fitness: {baseline_fitness:.3f}")
     for name, score in baseline_scores.items():
         console.print(f"    {name}: {score:.3f}")
 
     # ── 3. Run Darwinian Evolver ────────────────────────────────────────
-    console.print(f"\n[bold cyan]Step 3: Running Darwinian Evolver ({iterations} generations)[/bold cyan]\n")
+    console.print(
+        f"\n[bold cyan]Step 3: Running Darwinian Evolver ({iterations} generations)[/bold cyan]\n"
+    )
 
     start_time = time.time()
 
@@ -649,9 +688,7 @@ def evolve_tool_code(
     console.print("  [green]✓ All safety constraints pass[/green]")
 
     # ── 5. Report ───────────────────────────────────────────────────────
-    evolved_fitness, evolved_scores = evaluate_code_fitness(
-        tool_name, hermes_agent_path
-    )
+    evolved_fitness, evolved_scores = evaluate_code_fitness(tool_name, hermes_agent_path)
 
     console.print(f"\n  Baseline fitness: {baseline_fitness:.3f}")
     console.print(f"  Evolved fitness:  {evolved_fitness:.3f}")
@@ -690,12 +727,14 @@ def evolve_tool_code(
 @click.option(
     "--engine",
     type=click.Choice(["darwinian", "openevolve"]),
-    default="darwinian",
+    default="openevolve",
     show_default=True,
     help="Evolution engine to use",
 )
 @click.option("--output-root", default=None, help="Directory for review artifacts")
-@click.option("--openevolve-cmd", default="openevolve-run", show_default=True, help="OpenEvolve CLI command")
+@click.option(
+    "--openevolve-cmd", default="openevolve-run", show_default=True, help="OpenEvolve CLI command"
+)
 def main(tool, iterations, bug_issue, hermes_repo, dry_run, engine, output_root, openevolve_cmd):
     """Evolve tool implementation code using a selected evolution engine."""
     evolve_tool_code(

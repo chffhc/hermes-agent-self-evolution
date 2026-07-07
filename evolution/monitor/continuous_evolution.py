@@ -52,6 +52,7 @@ def _setup_logging(log_file: Path | None = None):
 
     # Console handler — use Rich for colored output in terminal
     from rich.logging import RichHandler
+
     console_handler = RichHandler(
         console=console,
         show_time=True,
@@ -63,13 +64,13 @@ def _setup_logging(log_file: Path | None = None):
 
     # File handler — full debug log for post-hoc analysis
     if log_file is None:
-        log_file = Path("evolution/monitor/evolution.log")
+        log_file = Path("output/monitor/evolution.log")
     log_file.parent.mkdir(parents=True, exist_ok=True)
     file_handler = logging.FileHandler(str(log_file), encoding="utf-8")
     file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(logging.Formatter(
-        "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-    ))
+    file_handler.setFormatter(
+        logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    )
     logger.addHandler(file_handler)
 
     logger.info("Continuous evolution logging initialized")
@@ -77,9 +78,11 @@ def _setup_logging(log_file: Path | None = None):
 
 # ── Performance metrics ─────────────────────────────────────────────────
 
+
 @dataclass
 class SkillMetric:
     """Per-skill performance metric."""
+
     name: str
     load_count: int  # How many times the skill was loaded
     success_count: int  # How many times the task succeeded
@@ -101,6 +104,7 @@ class SkillMetric:
 @dataclass
 class ToolMetric:
     """Per-tool selection metric."""
+
     name: str
     selection_count: int
     correct_selection_count: int  # Judged as the right tool
@@ -114,6 +118,7 @@ class ToolMetric:
 @dataclass
 class BenchmarkTrend:
     """Benchmark score trend over time."""
+
     name: str
     scores: list[tuple[str, float]]  # (timestamp, score)
 
@@ -138,6 +143,7 @@ class BenchmarkTrend:
 @dataclass
 class OptimizationTarget:
     """A candidate for optimization."""
+
     target_type: str  # "skill", "tool", "prompt"
     target_name: str
     current_score: float
@@ -149,6 +155,7 @@ class OptimizationTarget:
 
 # ── Performance monitor ─────────────────────────────────────────────────
 
+
 class PerformanceMonitor:
     """Tracks performance metrics from real Hermes Agent usage.
 
@@ -158,7 +165,7 @@ class PerformanceMonitor:
 
     def __init__(self, hermes_agent_path: Path | None = None):
         self.hermes_agent_path = hermes_agent_path or get_hermes_agent_path()
-        self.metrics_file = Path("evolution/monitor/metrics_store.json")
+        self.metrics_file = Path("output/monitor/metrics_store.json")
         self._metrics = self._load_metrics()
 
     def _load_metrics(self) -> dict:
@@ -175,9 +182,7 @@ class PerformanceMonitor:
     def save_metrics(self):
         """Persist current metrics."""
         self.metrics_file.parent.mkdir(parents=True, exist_ok=True)
-        self.metrics_file.write_text(
-            json.dumps(self._metrics, indent=2, ensure_ascii=False)
-        )
+        self.metrics_file.write_text(json.dumps(self._metrics, indent=2, ensure_ascii=False))
 
     def scan_session_db(self) -> dict[str, SkillMetric]:
         """Scan SessionDB for skill usage patterns.
@@ -203,6 +208,7 @@ class PerformanceMonitor:
 
             # Parse skill loading and task outcomes
             import re
+
             skill_pattern = re.compile(r"skill[ _:]+(\S+)", re.IGNORECASE)
             success_pattern = re.compile(r"(?:success|completed|done|passed)", re.IGNORECASE)
             fail_pattern = re.compile(r"(?:fail|error|broken|incorrect)", re.IGNORECASE)
@@ -245,7 +251,7 @@ class PerformanceMonitor:
 
         return skill_metrics
 
-    def scan_logs(self) -> dict[str, SkillMetric]:
+    def scan_logs(self) -> dict[str, ToolMetric]:
         """Scan agent logs for tool usage and error patterns."""
         log_path = Path.home() / ".hermes" / "logs" / "agent.log"
         tool_metrics: dict[str, ToolMetric] = {}
@@ -255,9 +261,8 @@ class PerformanceMonitor:
 
         try:
             import re
-            tool_call_pattern = re.compile(r"Tool call: (\w+)")
-            error_pattern = re.compile(r"Tool execution failed|Error:|Exception:")
 
+            tool_call_pattern = re.compile(r"Tool call: (\w+)")
             with open(log_path) as f:
                 for line in f:
                     tool_match = tool_call_pattern.search(line)
@@ -271,11 +276,6 @@ class PerformanceMonitor:
                                 avg_param_accuracy=0.0,
                             )
                         tool_metrics[tool_name].selection_count += 1
-
-                    if error_pattern.search(line) and tool_metrics:
-                        # Last mentioned tool likely caused the error
-                        for t in list(tool_metrics.values())[-1:]:
-                            t.correct_selection_count = max(0, t.correct_selection_count)
 
         except Exception:
             pass
@@ -298,9 +298,7 @@ class PerformanceMonitor:
         self._metrics["last_updated"] = datetime.now().isoformat()
         self.save_metrics()
 
-        return [
-            SkillMetric(**data) for data in self._metrics["skills"].values()
-        ]
+        return [SkillMetric(**data) for data in self._metrics["skills"].values()]
 
     def get_tool_metrics(self) -> list[ToolMetric]:
         """Get current tool performance metrics."""
@@ -314,9 +312,7 @@ class PerformanceMonitor:
             }
         self.save_metrics()
 
-        return [
-            ToolMetric(**data) for data in self._metrics["tools"].values()
-        ]
+        return [ToolMetric(**data) for data in self._metrics["tools"].values()]
 
     def get_benchmark_trends(self) -> list[BenchmarkTrend]:
         """Get benchmark score trends from stored data."""
@@ -330,13 +326,12 @@ class PerformanceMonitor:
         """Record a benchmark result."""
         if name not in self._metrics["benchmarks"]:
             self._metrics["benchmarks"][name] = {"scores": []}
-        self._metrics["benchmarks"][name]["scores"].append(
-            (datetime.now().isoformat(), score)
-        )
+        self._metrics["benchmarks"][name]["scores"].append((datetime.now().isoformat(), score))
         self.save_metrics()
 
 
 # ── Auto-triage ─────────────────────────────────────────────────────────
+
 
 class AutoTriage:
     """Identifies optimization targets ranked by impact × frequency.
@@ -370,49 +365,49 @@ class AutoTriage:
                 continue
             if sm.failure_rate > self.failure_rate_threshold:
                 estimated_improvement = min(0.5, sm.failure_rate * 0.8)
-                targets.append(OptimizationTarget(
-                    target_type="skill",
-                    target_name=sm.name,
-                    current_score=sm.success_rate,
-                    estimated_improvement=estimated_improvement,
-                    usage_frequency=sm.load_count,
-                    priority_score=estimated_improvement * sm.load_count,
-                    reason=(
-                        f"Failure rate {sm.failure_rate:.1%} "
-                        f"({sm.failure_count}/{sm.load_count} failures)"
-                    ),
-                ))
+                targets.append(
+                    OptimizationTarget(
+                        target_type="skill",
+                        target_name=sm.name,
+                        current_score=sm.success_rate,
+                        estimated_improvement=estimated_improvement,
+                        usage_frequency=sm.load_count,
+                        priority_score=estimated_improvement * sm.load_count,
+                        reason=(
+                            f"Failure rate {sm.failure_rate:.1%} "
+                            f"({sm.failure_count}/{sm.load_count} failures)"
+                        ),
+                    )
+                )
 
         # Tools with low selection accuracy
         for tm in tool_metrics:
             if tm.selection_count < self.min_usage:
                 continue
+            if tm.correct_selection_count == 0:
+                # Current log parsing can count tool calls but cannot infer that
+                # a tool choice was correct. Do not treat "no correctness
+                # evidence" as 0% accuracy, or Phase 5 will optimize every
+                # frequently-used tool on a fabricated metric.
+                continue
             accuracy = tm.selection_accuracy
             if accuracy < 0.8:  # Below 80% accuracy
                 estimated_improvement = min(0.3, (1.0 - accuracy) * 0.5)
-                targets.append(OptimizationTarget(
-                    target_type="tool",
-                    target_name=tm.name,
-                    current_score=accuracy,
-                    estimated_improvement=estimated_improvement,
-                    usage_frequency=tm.selection_count,
-                    priority_score=estimated_improvement * tm.selection_count,
-                    reason=f"Selection accuracy {accuracy:.1%}",
-                ))
+                targets.append(
+                    OptimizationTarget(
+                        target_type="tool",
+                        target_name=tm.name,
+                        current_score=accuracy,
+                        estimated_improvement=estimated_improvement,
+                        usage_frequency=tm.selection_count,
+                        priority_score=estimated_improvement * tm.selection_count,
+                        reason=f"Selection accuracy {accuracy:.1%}",
+                    )
+                )
 
-        # Degrading benchmarks
-        for bt in benchmark_trends:
-            if bt.trend == "degrading" and bt.latest_score is not None:
-                estimated_improvement = 0.2  # Conservative estimate
-                targets.append(OptimizationTarget(
-                    target_type="benchmark",
-                    target_name=bt.name,
-                    current_score=bt.latest_score,
-                    estimated_improvement=estimated_improvement,
-                    usage_frequency=10,  # Proxy
-                    priority_score=estimated_improvement * 10,
-                    reason=f"Benchmark trend: {bt.trend} (score: {bt.latest_score:.3f})",
-                ))
+        # Degrading benchmarks are diagnostic signals, not directly optimizable
+        # target types. Keep them out of the optimization queue until a mapper
+        # can translate regressions into concrete skill/tool/prompt targets.
 
         # Sort by priority score descending
         targets.sort(key=lambda t: t.priority_score, reverse=True)
@@ -424,6 +419,7 @@ class AutoTriage:
 
 
 # ── Continuous evolution orchestrator ───────────────────────────────────
+
 
 class ContinuousEvolution:
     """Orchestrates the full continuous improvement loop.
@@ -453,7 +449,7 @@ class ContinuousEvolution:
         self.optimize_iterations = optimize_iterations
         self.optimizer_model = optimizer_model
         self.resume = resume
-        self.checkpoint_file = Path("evolution/monitor/checkpoint.json")
+        self.checkpoint_file = Path("output/monitor/checkpoint.json")
 
         self.monitor = PerformanceMonitor(self.hermes_agent_path)
         self.triage = AutoTriage()
@@ -508,7 +504,12 @@ class ContinuousEvolution:
         if target.target_type == "skill":
             try:
                 from evolution.skills.evolve_skill import evolve
-                logger.info("Optimizing skill: %s (%d iterations)", target.target_name, self.optimize_iterations)
+
+                logger.info(
+                    "Optimizing skill: %s (%d iterations)",
+                    target.target_name,
+                    self.optimize_iterations,
+                )
                 evolve(
                     skill_name=target.target_name,
                     iterations=self.optimize_iterations,
@@ -516,12 +517,14 @@ class ContinuousEvolution:
                     optimizer_model=self.optimizer_model,
                     eval_model=self.optimizer_model,
                     hermes_repo=str(self.hermes_agent_path),
-                    run_tests=False,
+                    run_tests=True,
                 )
                 # Check output directory for the latest run
                 output_dir = Path("output") / target.target_name
                 if output_dir.exists():
-                    subdirs = sorted(output_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
+                    subdirs = sorted(
+                        output_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True
+                    )
                     if subdirs:
                         metrics_file = subdirs[0] / "metrics.json"
                         if metrics_file.exists():
@@ -529,7 +532,12 @@ class ContinuousEvolution:
                             result["improvement"] = metrics.get("improvement", 0.0)
                             result["output_dir"] = str(subdirs[0])
                             result["success"] = metrics.get("improvement", 0.0) > 0
-                logger.info("Skill %s: improvement=%+.3f success=%s", target.target_name, result["improvement"], result["success"])
+                logger.info(
+                    "Skill %s: improvement=%+.3f success=%s",
+                    target.target_name,
+                    result["improvement"],
+                    result["success"],
+                )
             except Exception as e:
                 logger.error("Skill optimization failed for %s: %s", target.target_name, e)
                 result["error"] = str(e)
@@ -537,7 +545,12 @@ class ContinuousEvolution:
         elif target.target_type == "tool":
             try:
                 from evolution.tools.evolve_tool_descriptions import evolve_tool_descriptions
-                logger.info("Optimizing tool description: %s (%d iterations)", target.target_name, self.optimize_iterations)
+
+                logger.info(
+                    "Optimizing tool description: %s (%d iterations)",
+                    target.target_name,
+                    self.optimize_iterations,
+                )
                 evolve_tool_descriptions(
                     iterations=self.optimize_iterations,
                     optimizer_model=self.optimizer_model,
@@ -547,7 +560,9 @@ class ContinuousEvolution:
                 )
                 output_dir = Path("output/tool_descriptions")
                 if output_dir.exists():
-                    subdirs = sorted(output_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
+                    subdirs = sorted(
+                        output_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True
+                    )
                     if subdirs:
                         mf = subdirs[0] / "metrics.json"
                         if mf.exists():
@@ -555,7 +570,12 @@ class ContinuousEvolution:
                             result["improvement"] = metrics.get("improvement", 0.0)
                             result["output_dir"] = str(subdirs[0])
                             result["success"] = metrics.get("improvement", 0.0) > 0
-                logger.info("Tool %s: improvement=%+.3f success=%s", target.target_name, result["improvement"], result["success"])
+                logger.info(
+                    "Tool %s: improvement=%+.3f success=%s",
+                    target.target_name,
+                    result["improvement"],
+                    result["success"],
+                )
             except Exception as e:
                 logger.error("Tool optimization failed for %s: %s", target.target_name, e)
                 result["error"] = str(e)
@@ -563,7 +583,12 @@ class ContinuousEvolution:
         elif target.target_type == "prompt":
             try:
                 from evolution.prompts.evolve_prompt_section import evolve_prompt_section
-                logger.info("Optimizing prompt section: %s (%d iterations)", target.target_name, self.optimize_iterations)
+
+                logger.info(
+                    "Optimizing prompt section: %s (%d iterations)",
+                    target.target_name,
+                    self.optimize_iterations,
+                )
                 evolve_prompt_section(
                     section_name=target.target_name,
                     iterations=self.optimize_iterations,
@@ -573,7 +598,9 @@ class ContinuousEvolution:
                 )
                 output_dir = Path("output/prompt_sections")
                 if output_dir.exists():
-                    subdirs = sorted(output_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
+                    subdirs = sorted(
+                        output_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True
+                    )
                     if subdirs:
                         mf = subdirs[0] / "metrics.json"
                         if mf.exists():
@@ -581,7 +608,12 @@ class ContinuousEvolution:
                             result["improvement"] = metrics.get("improvement", 0.0)
                             result["output_dir"] = str(subdirs[0])
                             result["success"] = metrics.get("improvement", 0.0) > 0
-                logger.info("Prompt section %s: improvement=%+.3f success=%s", target.target_name, result["improvement"], result["success"])
+                logger.info(
+                    "Prompt section %s: improvement=%+.3f success=%s",
+                    target.target_name,
+                    result["improvement"],
+                    result["success"],
+                )
             except Exception as e:
                 logger.error("Prompt optimization failed for %s: %s", target.target_name, e)
                 result["error"] = str(e)
@@ -624,8 +656,12 @@ class ContinuousEvolution:
         tool_metrics = self.monitor.get_tool_metrics()
         benchmark_trends = self.monitor.get_benchmark_trends()
 
-        logger.info("Skills tracked: %d, Tools tracked: %d, Benchmarks: %d",
-                     len(skill_metrics), len(tool_metrics), len(benchmark_trends))
+        logger.info(
+            "Skills tracked: %d, Tools tracked: %d, Benchmarks: %d",
+            len(skill_metrics),
+            len(tool_metrics),
+            len(benchmark_trends),
+        )
 
         # ── Step 2: Triage ──────────────────────────────────────────────
         logger.info("Step 2: Identifying optimization targets")
@@ -638,10 +674,16 @@ class ContinuousEvolution:
             self._clear_checkpoint()
             return summary
 
-        targets = targets[:self.max_targets]
+        targets = targets[: self.max_targets]
         for t in targets:
-            logger.info("Target: %s/%s priority=%.2f score=%.3f reason=%s",
-                         t.target_type, t.target_name, t.priority_score, t.current_score, t.reason)
+            logger.info(
+                "Target: %s/%s priority=%.2f score=%.3f reason=%s",
+                t.target_type,
+                t.target_name,
+                t.priority_score,
+                t.current_score,
+                t.reason,
+            )
 
         if dry_run:
             logger.info("DRY RUN — would optimize %d targets", len(targets))
@@ -656,45 +698,67 @@ class ContinuousEvolution:
             # Try the fast benchmarks as a regression check
             try:
                 fast_result = self.benchmarks.run_tblite_fast()
-                if fast_result.error:
-                    logger.warning("Benchmark gate skipped: %s", fast_result.error)
-                else:
-                    gate = self.benchmarks.check_gate([fast_result])
-                    summary["benchmarks_passed"] = gate.passed
-                    if not gate.passed:
-                        logger.warning("Benchmark gate FAILED: %s", gate.regressions)
+                gate = self.benchmarks.check_gate([fast_result], fail_on_error=True)
+                summary["benchmarks_passed"] = gate.passed
+                if not gate.passed:
+                    logger.error("Benchmark gate FAILED: %s", gate.regressions)
+                    summary["elapsed_seconds"] = time.time() - start
+                    return summary
             except Exception as e:
-                logger.warning("Benchmark gate error (continuing anyway): %s", e)
+                logger.error("Benchmark gate error: %s", e)
+                summary["benchmarks_passed"] = False
+                summary["elapsed_seconds"] = time.time() - start
+                return summary
 
         # ── Step 4: Optimize top targets ────────────────────────────────
         logger.info("Step 4: Optimizing %d targets", len(targets))
 
         target_results = []
-        start_index = checkpoint["next_target_index"] if checkpoint else 0
+        completed_targets = {
+            (item.get("type"), item.get("name"))
+            for item in summary.get("optimizations", [])
+            if item.get("success") or item.get("error") is not None
+        }
 
         for i, target in enumerate(targets):
-            if i < start_index:
-                logger.info("Skipping already-optimized target: %s/%s", target.target_type, target.target_name)
+            if (target.target_type, target.target_name) in completed_targets:
+                logger.info(
+                    "Skipping checkpoint-completed target: %s/%s",
+                    target.target_type,
+                    target.target_name,
+                )
                 continue
 
-            logger.info("Optimizing target %d/%d: %s/%s", i + 1, len(targets), target.target_type, target.target_name)
+            logger.info(
+                "Optimizing target %d/%d: %s/%s",
+                i + 1,
+                len(targets),
+                target.target_type,
+                target.target_name,
+            )
 
             result = self._optimize_target(target)
             target_results.append(result)
-            summary["optimizations"].append({
-                "type": target.target_type,
-                "name": target.target_name,
-                "improvement": result["improvement"],
-                "success": result["success"],
-                "output_dir": result["output_dir"],
-                "error": result["error"],
-            })
+            summary["optimizations"].append(
+                {
+                    "type": target.target_type,
+                    "name": target.target_name,
+                    "improvement": result["improvement"],
+                    "success": result["success"],
+                    "output_dir": result["output_dir"],
+                    "error": result["error"],
+                }
+            )
 
             if result["success"]:
                 summary["targets_optimized"] += 1
             else:
-                logger.warning("Optimization did not improve %s/%s: %s",
-                               target.target_type, target.target_name, result.get("error", "no improvement"))
+                logger.warning(
+                    "Optimization did not improve %s/%s: %s",
+                    target.target_type,
+                    target.target_name,
+                    result.get("error", "no improvement"),
+                )
 
             # Save checkpoint after each target
             self._save_checkpoint(summary, i + 1, targets)
@@ -704,13 +768,18 @@ class ContinuousEvolution:
         self._clear_checkpoint()
 
         logger.info("=== Cycle complete in %.1fs ===", summary["elapsed_seconds"])
-        logger.info("Targets found: %d, optimized: %d, PRs created: %d",
-                     summary["targets_found"], summary["targets_optimized"], summary["prs_created"])
+        logger.info(
+            "Targets found: %d, optimized: %d, PRs created: %d",
+            summary["targets_found"],
+            summary["targets_optimized"],
+            summary["prs_created"],
+        )
 
         return summary
 
 
 # ── CLI entry point ─────────────────────────────────────────────────────
+
 
 def setup_cron_jobs():
     """Set up cron jobs for continuous improvement.
@@ -752,7 +821,9 @@ def main():
     parser.add_argument("--setup-cron", action="store_true", help="Set up cron jobs")
     parser.add_argument("--dry-run", action="store_true", help="Show what would be done")
     parser.add_argument("--hermes-repo", default=None, help="Path to hermes-agent repo")
-    parser.add_argument("--iterations", default=10, type=int, help="Iterations per target (default: 10)")
+    parser.add_argument(
+        "--iterations", default=10, type=int, help="Iterations per target (default: 10)"
+    )
     parser.add_argument("--model", default="qwen3.6-plus", help="Optimizer model")
     parser.add_argument("--max-targets", default=3, type=int, help="Max targets per cycle")
     parser.add_argument("--no-resume", action="store_true", help="Skip checkpoint resume")

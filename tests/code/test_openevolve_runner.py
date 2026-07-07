@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from evolution.code.openevolve_runner import OpenEvolveRunnerConfig, run_openevolve_isolated

@@ -24,6 +24,7 @@ from evolution.core.config import EvolutionConfig, make_lm
 @dataclass
 class EvalExample:
     """A single evaluation example."""
+
     task_input: str  # What the user asks
     expected_behavior: str  # Rubric — what a good response looks like
     difficulty: str = "medium"  # easy, medium, hard
@@ -47,6 +48,7 @@ class EvalExample:
 @dataclass
 class EvalDataset:
     """Train/val/holdout split of evaluation examples."""
+
     train: list[EvalExample] = field(default_factory=list)
     val: list[EvalExample] = field(default_factory=list)
     holdout: list[EvalExample] = field(default_factory=list)
@@ -58,7 +60,11 @@ class EvalDataset:
     def save(self, path: Path):
         """Save dataset splits to JSONL files."""
         path.mkdir(parents=True, exist_ok=True)
-        for split_name, split_data in [("train", self.train), ("val", self.val), ("holdout", self.holdout)]:
+        for split_name, split_data in [
+            ("train", self.train),
+            ("val", self.val),
+            ("holdout", self.holdout),
+        ]:
             with open(path / f"{split_name}.jsonl", "w") as f:
                 for ex in split_data:
                     f.write(json.dumps(ex.to_dict()) + "\n")
@@ -113,9 +119,9 @@ def _try_parse_json_array(text: str) -> list:
     stripped = text.strip()
     if stripped.startswith("```"):
         # Remove opening fence (```json, ```JSON, etc.)
-        stripped = re.sub(r'^```[a-zA-Z]*\n?', '', stripped)
+        stripped = re.sub(r"^```[a-zA-Z]*\n?", "", stripped)
         # Remove closing fence
-        stripped = re.sub(r'\n?```\s*$', '', stripped)
+        stripped = re.sub(r"\n?```\s*$", "", stripped)
         try:
             result = json.loads(stripped)
             if isinstance(result, list):
@@ -124,7 +130,7 @@ def _try_parse_json_array(text: str) -> list:
             pass
 
     # Strategy 3: Extract JSON array from surrounding text
-    match = re.search(r'\[.*\]', stripped, re.DOTALL)
+    match = re.search(r"\[.*\]", stripped, re.DOTALL)
     if match:
         candidate = match.group()
 
@@ -137,7 +143,7 @@ def _try_parse_json_array(text: str) -> list:
             pass
 
         # 3b. Fix trailing commas before closing brackets
-        fixed = re.sub(r',(\s*[\]}])', r'\1', candidate)
+        fixed = re.sub(r",(\s*[\]}])", r"\1", candidate)
         try:
             result = json.loads(fixed)
             if isinstance(result, list):
@@ -147,7 +153,7 @@ def _try_parse_json_array(text: str) -> list:
 
         # 3c. Replace single quotes with double quotes for Python-style dicts
         fixed2 = re.sub(r"(?P<key>[{,])\s*'([^']+)'\s*:", r'\1 "\2":', fixed)
-        fixed2 = re.sub(r":\s*'([^']*)'", lambda m: ': ' + json.dumps(m.group(1)), fixed2)
+        fixed2 = re.sub(r":\s*'([^']*)'", lambda m: ": " + json.dumps(m.group(1)), fixed2)
         try:
             result = json.loads(fixed2)
             if isinstance(result, list):
@@ -190,15 +196,23 @@ class SyntheticDatasetBuilder:
         - A difficulty level (easy, medium, hard)
         - A category (what aspect of the skill this tests)
         """
-        artifact_text: str = dspy.InputField(desc="The full text of the skill/tool/prompt being tested")
-        artifact_type: str = dspy.InputField(desc="Type: 'skill', 'tool_description', or 'prompt_section'")
+
+        artifact_text: str = dspy.InputField(
+            desc="The full text of the skill/tool/prompt being tested"
+        )
+        artifact_type: str = dspy.InputField(
+            desc="Type: 'skill', 'tool_description', or 'prompt_section'"
+        )
         num_cases: int = dspy.InputField(desc="Number of test cases to generate")
-        test_cases: str = dspy.OutputField(desc="JSON array of test cases, each with: task_input, expected_behavior, difficulty, category")
+        test_cases: str = dspy.OutputField(
+            desc="JSON array of test cases, each with: task_input, expected_behavior, difficulty, category"
+        )
 
     def __init__(self, config: EvolutionConfig):
         self.config = config
         # Use ChatAdapter to avoid DashScope JSON mode compatibility issues
         from dspy.adapters import ChatAdapter
+
         self.generator = dspy.ChainOfThought(self.GenerateTestCases)
         self._adapter = ChatAdapter()
 
@@ -246,8 +260,8 @@ class SyntheticDatasetBuilder:
 
         return EvalDataset(
             train=examples[:n_train],
-            val=examples[n_train:n_train + n_val],
-            holdout=examples[n_train + n_val:],
+            val=examples[n_train : n_train + n_val],
+            holdout=examples[n_train + n_val :],
         )
 
 
@@ -279,6 +293,6 @@ class GoldenDatasetLoader:
 
         return EvalDataset(
             train=examples[:n_train],
-            val=examples[n_train:n_train + n_val],
-            holdout=examples[n_train + n_val:],
+            val=examples[n_train : n_train + n_val],
+            holdout=examples[n_train + n_val :],
         )

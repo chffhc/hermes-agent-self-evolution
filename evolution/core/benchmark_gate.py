@@ -15,6 +15,7 @@ skill quality but drops benchmark scores is REJECTED.
 import json
 import os
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -23,6 +24,7 @@ from pathlib import Path
 @dataclass
 class BenchmarkResult:
     """Result of a single benchmark run."""
+
     name: str
     score: float  # 0-1 pass rate
     total_tasks: int
@@ -37,6 +39,7 @@ class BenchmarkResult:
 @dataclass
 class GateResult:
     """Result of running all benchmark gates."""
+
     passed: bool
     results: list[BenchmarkResult]
     baseline_scores: dict[str, float]
@@ -70,18 +73,18 @@ class BenchmarkGate:
             except (json.JSONDecodeError, OSError) as e:
                 # Corrupted baseline — start fresh
                 import logging
+
                 logging.getLogger(__name__).warning(
                     "Failed to load baselines from %s: %s — starting fresh",
-                    self.baseline_file, e,
+                    self.baseline_file,
+                    e,
                 )
         return {}
 
     def save_baselines(self):
         """Save current scores as new baselines."""
         self.baseline_file.parent.mkdir(parents=True, exist_ok=True)
-        self.baseline_file.write_text(
-            json.dumps(self.baseline_scores, indent=2)
-        )
+        self.baseline_file.write_text(json.dumps(self.baseline_scores, indent=2))
 
     def run_tblite_fast(
         self,
@@ -169,9 +172,11 @@ class BenchmarkGate:
             result.elapsed_seconds = time.time() - start
             return result
 
-        cmd = ["python", str(runner), "--tasks", str(task_count)]
+        cmd = [sys.executable, str(runner), "--tasks", str(task_count)]
+        override_path = None
         if skill_overrides:
             import tempfile
+
             fd, override_path = tempfile.mkstemp(suffix=".json", prefix="skill_overrides_")
             try:
                 with os.fdopen(fd, "w") as f:
@@ -186,13 +191,20 @@ class BenchmarkGate:
                 raise
 
         try:
-            proc = subprocess.run(
-                cmd,
-                cwd=str(self.hermes_agent_path),
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    cwd=str(self.hermes_agent_path),
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                )
+            finally:
+                if override_path:
+                    try:
+                        os.unlink(override_path)
+                    except OSError:
+                        pass
             result.elapsed_seconds = time.time() - start
 
             if proc.returncode == 0:
@@ -202,9 +214,7 @@ class BenchmarkGate:
                 result.failed_tasks = output.get("failed", task_count)
                 result.total_tasks = result.passed_tasks + result.failed_tasks
                 result.score = (
-                    result.passed_tasks / result.total_tasks
-                    if result.total_tasks > 0
-                    else 0.0
+                    result.passed_tasks / result.total_tasks if result.total_tasks > 0 else 0.0
                 )
                 result.details = output
             else:
@@ -223,6 +233,7 @@ class BenchmarkGate:
         self,
         results: list[BenchmarkResult],
         max_regression: float | None = None,
+        fail_on_error: bool = True,
     ) -> GateResult:
         """Check if all benchmark gates pass (no significant regression).
 
@@ -235,7 +246,8 @@ class BenchmarkGate:
 
         for r in results:
             if r.error:
-                # If benchmark couldn't run, skip gate (don't fail on missing infra)
+                if fail_on_error:
+                    regressions.append(f"{r.name}: benchmark error: {r.error}")
                 continue
 
             baseline = self.baseline_scores.get(r.name)
@@ -286,8 +298,9 @@ def establish_baselines(
         if result.error:
             print(f"    ⚠ Skipped: {result.error}")
         else:
-            print(f"    ✓ Score: {result.score:.3f} "
-                  f"({result.passed_tasks}/{result.total_tasks})")
+            print(
+                f"    ✓ Score: {result.score:.3f} " f"({result.passed_tasks}/{result.total_tasks})"
+            )
             gate.update_baseline(name, result.score)
 
     print(f"\n  Baselines saved to {gate.baseline_file}")

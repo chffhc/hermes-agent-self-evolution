@@ -62,9 +62,7 @@ def parse_json_array(text: str) -> list[dict[str, Any]]:
 
         # 3c. Replace single quotes with double quotes for Python-style dicts
         fixed2 = re.sub(r"(?P<key>[{,])\s*'([^']+)'\s*:", r'\1 "\2":', fixed)
-        fixed2 = re.sub(
-            r":\s*'([^']*)'", lambda m: ": " + json.dumps(m.group(1)), fixed2
-        )
+        fixed2 = re.sub(r":\s*'([^']*)'", lambda m: ": " + json.dumps(m.group(1)), fixed2)
         try:
             result = json.loads(fixed2)
             if isinstance(result, list):

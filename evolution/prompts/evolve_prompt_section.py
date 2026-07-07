@@ -31,7 +31,7 @@ import dspy
 from rich.console import Console
 from rich.table import Table
 
-from evolution.core.config import EvolutionConfig
+from evolution.core.config import EvolutionConfig, resolve_hermes_agent_path
 from evolution.core.utils import parse_json_array
 
 console = Console()
@@ -73,6 +73,7 @@ PLATFORM_HINTS_FILE = "agent/prompt_builder.py"
 @dataclass
 class PromptSection:
     """A single evolvable system prompt section."""
+
     name: str
     content: str
     file_path: str  # Relative path in hermes-agent
@@ -84,6 +85,7 @@ class PromptSection:
 @dataclass
 class BehavioralTestExample:
     """A test case for evaluating prompt section quality."""
+
     scenario: str  # The situation/task
     section_name: str  # Which section this tests
     expected_behavior: str  # Rubric for good behavior
@@ -94,6 +96,7 @@ class BehavioralTestExample:
 @dataclass
 class PromptEvalDataset:
     """Dataset for prompt section evaluation."""
+
     examples: list[BehavioralTestExample]
     train: list[BehavioralTestExample] = field(default_factory=list)
     val: list[BehavioralTestExample] = field(default_factory=list)
@@ -101,14 +104,15 @@ class PromptEvalDataset:
 
     def split(self, train_ratio: float = 0.6, val_ratio: float = 0.2):
         import random
+
         random.seed(42)
         random.shuffle(self.examples)
         n = len(self.examples)
         n_train = max(1, int(n * train_ratio))
         n_val = max(1, int(n * val_ratio))
         self.train = self.examples[:n_train]
-        self.val = self.examples[n_train:n_train + n_val]
-        self.holdout = self.examples[n_train + n_val:]
+        self.val = self.examples[n_train : n_train + n_val]
+        self.holdout = self.examples[n_train + n_val :]
 
     def save(self, path: Path):
         path.mkdir(parents=True, exist_ok=True)
@@ -149,6 +153,7 @@ class PromptEvalDataset:
 
 # ── Section extractor ───────────────────────────────────────────────────
 
+
 def extract_prompt_sections(
     hermes_agent_path: Path,
     section_names: list[str] | None = None,
@@ -174,14 +179,16 @@ def extract_prompt_sections(
 
         content = _extract_constant(file_path, name)
         if content:
-            sections.append(PromptSection(
-                name=name,
-                content=content,
-                file_path=info["file"],
-                description=info["description"],
-                max_growth_pct=info["max_growth_pct"],
-                risk_level=info["risk_level"],
-            ))
+            sections.append(
+                PromptSection(
+                    name=name,
+                    content=content,
+                    file_path=info["file"],
+                    description=info["description"],
+                    max_growth_pct=info["max_growth_pct"],
+                    risk_level=info["risk_level"],
+                )
+            )
             console.print(f"  ✓ {name}: {len(content)} chars — {content[:60]}...")
         else:
             console.print(f"  [red]✗ Could not extract {name}[/red]")
@@ -201,10 +208,11 @@ def _extract_constant(file_path: Path, name: str) -> str | None:
 
     # Find the constant definition
     import re
+
     # Pattern: NAME = (\n    "..." \n    "..." \n)
     # or: NAME = "..."
     safe_name = re.escape(name)
-    pattern = rf'^{safe_name}\s*=\s*\(([\s\S]*?)\)\s*$'
+    pattern = rf"^{safe_name}\s*=\s*\(([\s\S]*?)\)\s*$"
     match = re.search(pattern, source, re.MULTILINE)
 
     if match:
@@ -225,6 +233,7 @@ def _extract_constant(file_path: Path, name: str) -> str | None:
 
 # ── Behavioral test generator ───────────────────────────────────────────
 
+
 class BehavioralTestGenerator:
     """Generates behavioral test scenarios for prompt sections."""
 
@@ -239,12 +248,11 @@ class BehavioralTestGenerator:
         - expected_behavior: What the agent SHOULD do
         - should_not_do: What the agent should NOT do (common failure mode)
         """
+
         section_name: str = dspy.InputField(desc="Name of the prompt section being tested")
         section_content: str = dspy.InputField(desc="Current section content/instructions")
         num_tests: int = dspy.InputField(desc="Number of test scenarios to generate")
-        test_scenarios_json: str = dspy.OutputField(
-            desc="JSON array of behavioral test scenarios"
-        )
+        test_scenarios_json: str = dspy.OutputField(desc="JSON array of behavioral test scenarios")
 
     def __init__(self, config: EvolutionConfig):
         self.config = config
@@ -269,13 +277,15 @@ class BehavioralTestGenerator:
                 )
                 examples_json = parse_json_array(result.test_scenarios_json)
                 for ex in examples_json:
-                    all_examples.append(BehavioralTestExample(
-                        scenario=ex.get("scenario", ""),
-                        section_name=section.name,
-                        expected_behavior=ex.get("expected_behavior", ""),
-                        expected_tool_usage=ex.get("expected_tool_usage"),
-                        should_not_do=ex.get("should_not_do"),
-                    ))
+                    all_examples.append(
+                        BehavioralTestExample(
+                            scenario=ex.get("scenario", ""),
+                            section_name=section.name,
+                            expected_behavior=ex.get("expected_behavior", ""),
+                            expected_tool_usage=ex.get("expected_tool_usage"),
+                            should_not_do=ex.get("should_not_do"),
+                        )
+                    )
             except Exception as e:
                 console.print(f"    ⚠ Failed: {e}")
 
@@ -288,8 +298,8 @@ class BehavioralTestGenerator:
         return dataset
 
 
-
 # ── Behavioral evaluator ────────────────────────────────────────────────
+
 
 class BehavioralEvaluator:
     """Evaluates agent behavior with a given system prompt.
@@ -304,11 +314,14 @@ class BehavioralEvaluator:
         Score how well the agent followed the system prompt instructions
         and behaved correctly for the given scenario.
         """
+
         scenario: str = dspy.InputField(desc="The task/scenario given to the agent")
         system_prompt_section: str = dspy.InputField(desc="The relevant system prompt section")
         agent_behavior: str = dspy.InputField(desc="How the agent responded/behaved")
         expected_behavior: str = dspy.InputField(desc="Rubric for expected behavior")
-        score: float = dspy.OutputField(desc="Score 0.0-1.0: how well behavior matches expectations")
+        score: float = dspy.OutputField(
+            desc="Score 0.0-1.0: how well behavior matches expectations"
+        )
         feedback: str = dspy.OutputField(desc="Specific feedback on what was good/bad")
 
     def __init__(self, config: EvolutionConfig):
@@ -355,8 +368,7 @@ class BehavioralEvaluator:
         n_evaluated = len([ex for ex in examples if ex.section_name in section_map])
         overall = total_score / max(1, n_evaluated)
         per_section_avg = {
-            name: per_section_scores[name] / per_section_counts[name]
-            for name in per_section_counts
+            name: per_section_scores[name] / per_section_counts[name] for name in per_section_counts
         }
 
         return overall, per_section_avg
@@ -446,28 +458,40 @@ class PromptSectionModule(dspy.Module):
                     sig = getattr(inner, sig_attr, None)
                     if sig is None:
                         continue
-                    instruction = getattr(sig, "instructions", None) or getattr(sig, "__doc__", "") or ""
+                    instruction = (
+                        getattr(sig, "instructions", None) or getattr(sig, "__doc__", "") or ""
+                    )
                     if instruction:
                         break
 
+                if not instruction:
+                    raise ValueError(f"Cannot find instruction for optimized section {name}")
+
                 start_idx = instruction.find(_SECTION_SENTINEL_START)
                 end_idx = instruction.find(_SECTION_SENTINEL_END)
-                if start_idx != -1 and end_idx != -1:
-                    content = instruction[start_idx + len(_SECTION_SENTINEL_START):end_idx].strip()
+                if start_idx == -1 or end_idx == -1:
+                    raise ValueError(
+                        f"Cannot find prompt section sentinels for {name}. "
+                        f"Instruction preview: {instruction[:300]}"
+                    )
+                content = instruction[start_idx + len(_SECTION_SENTINEL_START) : end_idx].strip()
 
-            evolved.append(PromptSection(
-                name=name,
-                content=content,
-                file_path=original.file_path,
-                description=original.description,
-                max_growth_pct=original.max_growth_pct,
-                risk_level=original.risk_level,
-            ))
+            evolved.append(
+                PromptSection(
+                    name=name,
+                    content=content,
+                    file_path=original.file_path,
+                    description=original.description,
+                    max_growth_pct=original.max_growth_pct,
+                    risk_level=original.risk_level,
+                )
+            )
 
         return evolved
 
 
 # ── Prompt section fitness metric ───────────────────────────────────────
+
 
 def prompt_section_fitness_metric(
     example: dspy.Example,
@@ -499,6 +523,7 @@ def prompt_section_fitness_metric(
 
 # ── Prompt section constraint validator ─────────────────────────────────
 
+
 def validate_prompt_sections(
     sections: list[PromptSection],
     baseline_sections: list[PromptSection] | None = None,
@@ -515,19 +540,23 @@ def validate_prompt_sections(
         if baseline_len > 0:
             growth = (len(section.content) - baseline_len) / baseline_len * 100
             if growth > section.max_growth_pct:
-                violations.append({
-                    "section": section.name,
-                    "violation": (
-                        f"Growth {growth:.1f}% exceeds limit of {section.max_growth_pct}%"
-                    ),
-                })
+                violations.append(
+                    {
+                        "section": section.name,
+                        "violation": (
+                            f"Growth {growth:.1f}% exceeds limit of {section.max_growth_pct}%"
+                        ),
+                    }
+                )
 
         # Check for empty content
         if not section.content.strip():
-            violations.append({
-                "section": section.name,
-                "violation": "Section content is empty",
-            })
+            violations.append(
+                {
+                    "section": section.name,
+                    "violation": "Section content is empty",
+                }
+            )
 
         # Check risk-level specific constraints
         if section.risk_level == "high":
@@ -536,15 +565,18 @@ def validate_prompt_sections(
             content_lower = section.content.lower()
             for trait in core_traits:
                 if trait not in content_lower:
-                    violations.append({
-                        "section": section.name,
-                        "violation": f"Missing core trait: '{trait}'",
-                    })
+                    violations.append(
+                        {
+                            "section": section.name,
+                            "violation": f"Missing core trait: '{trait}'",
+                        }
+                    )
 
     return violations
 
 
 # ── Main evolution function ─────────────────────────────────────────────
+
 
 def evolve_prompt_section(
     section_name: str = "ALL",
@@ -557,17 +589,19 @@ def evolve_prompt_section(
 ):
     """Main function to evolve system prompt sections."""
 
+    hermes_agent_path = resolve_hermes_agent_path(hermes_repo)
     config = EvolutionConfig(
+        hermes_agent_path=hermes_agent_path,
         iterations=iterations,
         optimizer_model=optimizer_model,
         eval_model=eval_model,
         judge_model=eval_model,
     )
-    if hermes_repo:
-        config.hermes_agent_path = Path(hermes_repo)
 
-    console.print("\n[bold cyan]🧬 Hermes Agent Self-Evolution[/bold cyan] — "
-                  "Evolving system prompt sections\n")
+    console.print(
+        "\n[bold cyan]🧬 Hermes Agent Self-Evolution[/bold cyan] — "
+        "Evolving system prompt sections\n"
+    )
 
     # ── 1. Extract current sections ─────────────────────────────────────
     console.print("[bold]Step 1: Extracting prompt sections[/bold]")
@@ -575,7 +609,7 @@ def evolve_prompt_section(
     if section_name != "ALL":
         target_sections = [section_name]
 
-    sections = extract_prompt_sections(config.hermes_agent_path, target_sections)
+    sections = extract_prompt_sections(hermes_agent_path, target_sections)
     if not sections:
         console.print("[red]✗ No sections found[/red]")
         sys.exit(1)
@@ -626,32 +660,33 @@ def evolve_prompt_section(
     baseline_sections = [PromptSection(**{**s.__dict__}) for s in sections]
 
     # ── 5. Run GEPA optimization ────────────────────────────────────────
-    console.print(f"\n[bold cyan]Step 5: Running GEPA optimization ({iterations} iterations)[/bold cyan]\n")
+    console.print(
+        f"\n[bold cyan]Step 5: Running GEPA optimization ({iterations} iterations)[/bold cyan]\n"
+    )
 
     start_time = time.time()
     optimized_module = None
 
+    train_examples = [
+        dspy.Example(
+            section_name=ex.section_name,
+            scenario=ex.scenario,
+            expected_behavior=ex.expected_behavior,
+        ).with_inputs("section_name", "scenario")
+        for ex in dataset.train
+    ]
+    val_examples = [
+        dspy.Example(
+            section_name=ex.section_name,
+            scenario=ex.scenario,
+            expected_behavior=ex.expected_behavior,
+        ).with_inputs("section_name", "scenario")
+        for ex in dataset.val
+    ]
+    module = PromptSectionModule(sections)
+
     try:
         reflection_lm = make_dashscope_lm(optimizer_model, num_retries=8, temperature=1.0)
-
-        train_examples = [
-            dspy.Example(
-                section_name=ex.section_name,
-                scenario=ex.scenario,
-                expected_behavior=ex.expected_behavior,
-            ).with_inputs("section_name", "scenario")
-            for ex in dataset.train
-        ]
-        val_examples = [
-            dspy.Example(
-                section_name=ex.section_name,
-                scenario=ex.scenario,
-                expected_behavior=ex.expected_behavior,
-            ).with_inputs("section_name", "scenario")
-            for ex in dataset.val
-        ]
-
-        module = PromptSectionModule(sections)
 
         optimizer = dspy.GEPA(
             metric=prompt_section_fitness_metric,
@@ -688,8 +723,16 @@ def evolve_prompt_section(
     # ── 6. Evaluate evolved behavior ────────────────────────────────────
     console.print("\n[bold]Step 5: Evaluating evolved behavior[/bold]")
 
-    if optimized_module and hasattr(optimized_module, 'get_evolved_sections'):
-        evolved_sections = optimized_module.get_evolved_sections()
+    if optimized_module and hasattr(optimized_module, "get_evolved_sections"):
+        try:
+            evolved_sections = optimized_module.get_evolved_sections()
+        except ValueError as e:
+            output_dir = Path("output/prompt_sections") / "extraction_FAILED"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            (output_dir / "error.txt").write_text(str(e), encoding="utf-8")
+            console.print(f"[red]✗ Could not extract evolved prompt sections: {e}[/red]")
+            console.print(f"  Saved extraction error to {output_dir}/error.txt")
+            sys.exit(1)
     else:
         evolved_sections = sections
 
@@ -750,7 +793,9 @@ def evolve_prompt_section(
     console.print(f"\n  Output saved to {output_dir}/")
 
     if improvement > 0:
-        console.print(f"\n[bold green]✓ Prompt behavior improved by {improvement:+.3f}[/bold green]")
+        console.print(
+            f"\n[bold green]✓ Prompt behavior improved by {improvement:+.3f}[/bold green]"
+        )
     else:
         console.print(f"\n[yellow]⚠ No improvement ({improvement:+.3f})[/yellow]")
 

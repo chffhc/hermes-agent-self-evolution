@@ -41,9 +41,7 @@ class TestToolDescriptionModule:
         # ChainOfThought wraps a Predict which has a signature
         predictor = module.predictor
         # Access the underlying signature via the wrapped predict
-        sig = getattr(predictor.predict, "signature", None) or getattr(
-            predictor, "_predict", None
-        )
+        sig = getattr(predictor.predict, "signature", None) or getattr(predictor, "_predict", None)
         if sig is not None:
             doc = getattr(sig, "__doc__", "") or getattr(sig, "instructions", "")
             assert "<!-- __TOOL_DESC_START__ -->" in doc
@@ -69,9 +67,7 @@ class TestToolDescriptionModule:
         module = ToolDescriptionModule(tools)
 
         # The key check: forward only takes 'task', not 'tool_descriptions'
-        forward_params = module.forward.__code__.co_varnames[
-            : module.forward.__code__.co_argcount
-        ]
+        forward_params = module.forward.__code__.co_varnames[: module.forward.__code__.co_argcount]
         assert "task" in forward_params
         assert "tool_descriptions" not in forward_params
 
@@ -98,9 +94,7 @@ class TestToolDescriptionModule:
 
         # Mock the compiled module's signature
         evolved_json = '[{"name": "search", "description": "IMPROVED desc"}]'
-        instruction = (
-            f"some text {_TOOL_SENTINEL_START}\n{evolved_json}\n{_TOOL_SENTINEL_END} end"
-        )
+        instruction = f"some text {_TOOL_SENTINEL_START}\n{evolved_json}\n{_TOOL_SENTINEL_END} end"
 
         class FakeSignature:
             __doc__ = instruction
@@ -112,6 +106,37 @@ class TestToolDescriptionModule:
 
         evolved = module.get_evolved_tools()
         assert evolved[0].description == "IMPROVED desc"
+
+    def test_missing_sentinel_fails_closed(self):
+        """If GEPA drops tool-description sentinels, extraction must fail closed."""
+        import pytest
+
+        from evolution.tools.evolve_tool_descriptions import (
+            ToolDescription,
+            ToolDescriptionModule,
+        )
+
+        tools = [
+            ToolDescription(
+                name="search",
+                toolset="core",
+                description="Original desc",
+                param_descriptions={},
+                schema={},
+                file_path="tools/search.py",
+            ),
+        ]
+        module = ToolDescriptionModule(tools)
+
+        class FakeSignature:
+            __doc__ = "optimized instruction without sentinel markers"
+
+        class FakePredictor:
+            signature = FakeSignature()
+
+        module.predictor = FakePredictor()
+        with pytest.raises(ValueError, match="sentinels"):
+            module.get_evolved_tools()
 
     def test_no_tool_descriptions_as_input_field(self):
         """Ensure tool_descriptions is NOT an InputField (was the original bug)."""
@@ -249,6 +274,37 @@ class TestPromptSectionModule:
         assert evolved[0].name == "MEMORY"
         assert "EVOLVED" in evolved[0].content
         assert "Original" not in evolved[0].content
+
+    def test_missing_sentinel_fails_closed(self):
+        """If GEPA drops prompt-section sentinels, extraction must fail closed."""
+        import pytest
+
+        from evolution.prompts.evolve_prompt_section import (
+            PromptSection,
+            PromptSectionModule,
+        )
+
+        sections = [
+            PromptSection(
+                name="MEMORY",
+                content="Original memory guidance",
+                file_path="agent/prompt_builder.py",
+                description="Memory guidance",
+                max_growth_pct=20,
+                risk_level="low",
+            ),
+        ]
+        module = PromptSectionModule(sections)
+
+        class FakeSignature:
+            __doc__ = "optimized instruction without sentinel markers"
+
+        class FakePredict:
+            signature = FakeSignature()
+
+        module.predictors["MEMORY"].predict = FakePredict()
+        with pytest.raises(ValueError, match="sentinels"):
+            module.get_evolved_sections()
 
 
 # ═══════════════════════════════════════════════════════════════════════════

@@ -8,10 +8,10 @@ import functools
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    import dspy
+    pass
 
 
 @functools.lru_cache(maxsize=1)
@@ -75,7 +75,55 @@ def get_api_base() -> str:
     return "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
 
-def make_lm(model: str, track_usage: bool = True, **kwargs) -> "dspy.LM":
+def _record_lm_usage(lm: Any) -> None:
+    """Record any new DSPy LM history entries since the last tracked call."""
+    from evolution.core.cost_tracker import tracker
+
+    try:
+        history = getattr(lm, "history", []) or []
+        last_recorded = getattr(lm, "_usage_tracking_last_history_len", 0)
+        raw_model = getattr(lm, "_usage_tracking_raw_model", "unknown")
+        for entry in history[last_recorded:]:
+            usage = entry.get("usage", {}) if isinstance(entry, dict) else {}
+            if not isinstance(usage, dict):
+                continue
+            inp = usage.get("prompt_tokens", 0) or usage.get("input_tokens", 0) or 0
+            out = usage.get("completion_tokens", 0) or usage.get("output_tokens", 0) or 0
+            tracker.record(raw_model, int(inp), int(out))
+        lm._usage_tracking_last_history_len = len(history)
+    except Exception:
+        pass  # Usage tracking must never break inference.
+
+
+def install_usage_tracking(lm: Any, raw_model: str) -> Any:
+    """Install per-instance usage tracking while preserving ``isinstance(lm, dspy.LM)``.
+
+    Assigning ``lm.__call__`` on the instance is ineffective for ``lm(...)``
+    because Python resolves special methods on the type. Instead, replace the
+    instance's class with a one-off subclass that wraps ``__call__``. This keeps
+    the object a real DSPy LM for code that checks ``isinstance(lm, dspy.LM)``.
+    """
+    if getattr(lm, "_usage_tracking_installed", False):
+        return lm
+
+    original_cls = lm.__class__
+
+    class UsageTrackedLM(original_cls):  # type: ignore[misc, valid-type]
+        def __call__(self, *args, **kwargs):
+            result = super().__call__(*args, **kwargs)
+            _record_lm_usage(self)
+            return result
+
+    UsageTrackedLM.__name__ = f"UsageTracked{original_cls.__name__}"
+    UsageTrackedLM.__qualname__ = UsageTrackedLM.__name__
+    lm._usage_tracking_raw_model = raw_model
+    lm._usage_tracking_last_history_len = 0
+    lm._usage_tracking_installed = True
+    lm.__class__ = UsageTrackedLM
+    return lm
+
+
+def make_lm(model: str, track_usage: bool = True, **kwargs) -> Any:
     """Create a DSPy LM configured for DashScope / OpenAI-compatible API.
 
     Args:
@@ -100,38 +148,10 @@ def make_lm(model: str, track_usage: bool = True, **kwargs) -> "dspy.LM":
         **kwargs,
     )
 
-    if track_usage:
-        _wrap_lm_for_tracking(lm, model)
-
-    return lm
+    return install_usage_tracking(lm, model) if track_usage else lm
 
 
-def _wrap_lm_for_tracking(lm: "dspy.LM", raw_model: str):
-    """Wrap a DSPy LM to automatically record usage to the cost tracker."""
-    from evolution.core.cost_tracker import tracker
-
-    original_call = lm.__call__
-
-    def tracked_call(*args, **kwargs):
-        result = original_call(*args, **kwargs)
-        try:
-            # DSPy stores usage in lm.history
-            history = getattr(lm, "history", [])
-            if history:
-                last = history[-1]
-                usage = last.get("usage", {})
-                if isinstance(usage, dict):
-                    inp = usage.get("prompt_tokens", 0) or usage.get("input_tokens", 0)
-                    out = usage.get("completion_tokens", 0) or usage.get("output_tokens", 0)
-                    tracker.record(raw_model, inp, out)
-        except Exception:
-            pass  # Don't let tracking break the LM
-        return result
-
-    lm.__call__ = tracked_call
-
-
-def make_dashscope_lm(model: str = "qwen3.6-plus", num_retries: int = 8, **kwargs) -> "dspy.LM":
+def make_dashscope_lm(model: str = "qwen3.6-plus", num_retries: int = 8, **kwargs) -> Any:
     """Create a DashScope LM with ChatAdapter-compatible settings.
 
     This is a convenience wrapper around make_lm that adds model_type='chat'
@@ -148,7 +168,7 @@ class EvolutionConfig:
     # can be constructed even when no repo is present (e.g. unit tests, or
     # callers that pass an explicit path). Use resolve_hermes_agent_path() when
     # an explicit override should win, or get_hermes_agent_path() to require one.
-    hermes_agent_path: Optional[Path] = field(default_factory=lambda: _discover_hermes_agent_path())
+    hermes_agent_path: Path | None = field(default_factory=lambda: _discover_hermes_agent_path())
 
     # Optimization parameters
     iterations: int = 10
@@ -156,8 +176,8 @@ class EvolutionConfig:
 
     # LLM configuration — defaults to DashScope qwen3.6-plus
     optimizer_model: str = "qwen3.6-plus"  # Model for GEPA reflections
-    eval_model: str = "qwen3.6-plus"       # Model for LLM-as-judge scoring
-    judge_model: str = "qwen3.6-plus"      # Model for dataset generation
+    eval_model: str = "qwen3.6-plus"  # Model for LLM-as-judge scoring
+    judge_model: str = "qwen3.6-plus"  # Model for dataset generation
 
     # Constraints
     max_skill_size: int = 50_000  # 50KB default (evolved skills may include few-shot examples)
@@ -181,7 +201,7 @@ class EvolutionConfig:
     create_pr: bool = True
 
 
-def _discover_hermes_agent_path() -> Optional[Path]:
+def _discover_hermes_agent_path() -> Path | None:
     """Best-effort hermes-agent repo discovery that never raises.
 
     Returns the discovered path, or None when no repo can be found. Used as
@@ -222,7 +242,7 @@ def get_hermes_agent_path() -> Path:
     )
 
 
-def resolve_hermes_agent_path(hermes_repo: Optional[str] = None) -> Path:
+def resolve_hermes_agent_path(hermes_repo: str | None = None) -> Path:
     """Return the hermes-agent repo path, honoring an explicit override.
 
     An explicit path (for example from ``--hermes-repo``) is expanded and used

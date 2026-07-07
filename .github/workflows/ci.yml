@@ -34,17 +34,13 @@ jobs:
 
       - name: Lint with ruff
         run: ruff check evolution/ tests/ --output-format=github
-        continue-on-error: true
 
       - name: Check formatting with black
         run: black --check --diff evolution/ tests/
-        continue-on-error: true
 
       - name: Run import checks
         run: |
           python -c "import evolution; import evolution.core; import evolution.skills; import evolution.tools; import evolution.prompts"
-        continue-on-error: true
 
       - name: Run tests
         run: pytest tests/ -v --tb=short
-        continue-on-error: true

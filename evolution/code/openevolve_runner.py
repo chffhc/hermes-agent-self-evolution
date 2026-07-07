@@ -136,7 +136,9 @@ def run_openevolve_isolated(config: OpenEvolveRunnerConfig) -> OpenEvolveRunResu
     evaluator = _copy_required_file(config.evaluator, work_dir / Path(config.evaluator).name)
     copied_config = None
     if config.config_file is not None:
-        copied_config = _copy_required_file(config.config_file, work_dir / Path(config.config_file).name)
+        copied_config = _copy_required_file(
+            config.config_file, work_dir / Path(config.config_file).name
+        )
 
     output_dir = work_dir / "openevolve-out"
     command = [

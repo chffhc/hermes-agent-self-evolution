@@ -13,7 +13,11 @@ def _assert_gepa_has_constructor_budget(func):
     gepa_pos = source.index("dspy.GEPA(")
     compile_pos = source.index(".compile(", gepa_pos)
     gepa_block = source[gepa_pos:compile_pos]
-    assert "max_metric_calls=" in gepa_block or "max_full_evals=" in gepa_block or "auto=" in gepa_block
+    assert (
+        "max_metric_calls=" in gepa_block
+        or "max_full_evals=" in gepa_block
+        or "auto=" in gepa_block
+    )
 
 
 def test_phase1_gepa_sets_budget_at_constructor():

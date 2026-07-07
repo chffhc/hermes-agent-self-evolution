@@ -25,6 +25,7 @@ _MODEL_PRICES: dict[str, tuple[float, float]] = {
 @dataclass
 class CallRecord:
     """A single LLM API call."""
+
     model: str
     input_tokens: int
     output_tokens: int
@@ -35,6 +36,7 @@ class CallRecord:
 @dataclass
 class CostSummary:
     """Aggregated cost summary."""
+
     total_calls: int = 0
     total_input_tokens: int = 0
     total_output_tokens: int = 0
@@ -87,18 +89,30 @@ class APICostTracker:
             s.total_cost_usd += cost
 
             # Per-model
-            pm = s.per_model.setdefault(c.model, {
-                "calls": 0, "input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0,
-            })
+            pm = s.per_model.setdefault(
+                c.model,
+                {
+                    "calls": 0,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cost_usd": 0.0,
+                },
+            )
             pm["calls"] += 1
             pm["input_tokens"] += c.input_tokens
             pm["output_tokens"] += c.output_tokens
             pm["cost_usd"] += cost
 
             # Per-purpose
-            pp = s.per_purpose.setdefault(c.purpose or "unknown", {
-                "calls": 0, "input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0,
-            })
+            pp = s.per_purpose.setdefault(
+                c.purpose or "unknown",
+                {
+                    "calls": 0,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cost_usd": 0.0,
+                },
+            )
             pp["calls"] += 1
             pp["input_tokens"] += c.input_tokens
             pp["output_tokens"] += c.output_tokens
@@ -151,20 +165,17 @@ def _estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
     """Estimate cost for a single API call."""
     # Normalize model name for lookup
     key = model
-    if "/" in key:
-        key = key.split("/")[-1]
     if key.startswith("openai/"):
-        key = key[len("openai/"):]
+        key = key[len("openai/") :]
+    elif "/" in key:
+        key = key.split("/")[-1]
 
     prices = _MODEL_PRICES.get(key)
     if prices is None:
         return 0.0  # Unknown model, can't estimate
 
     input_cost, output_cost = prices
-    return (
-        input_tokens / 1_000_000 * input_cost
-        + output_tokens / 1_000_000 * output_cost
-    )
+    return input_tokens / 1_000_000 * input_cost + output_tokens / 1_000_000 * output_cost
 
 
 # Global singleton for easy import

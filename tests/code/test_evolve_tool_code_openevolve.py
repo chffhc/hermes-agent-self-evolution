@@ -60,7 +60,9 @@ def test_evolve_tool_code_openevolve_outputs_review_artifacts_without_applying(
         captured["config"] = config
         best = config.output_root / "best_program.py"
         info = config.output_root / "best_program_info.json"
-        best.write_text(config.initial_program.read_text(encoding="utf-8") + "\n# evolved\n", encoding="utf-8")
+        best.write_text(
+            config.initial_program.read_text(encoding="utf-8") + "\n# evolved\n", encoding="utf-8"
+        )
         info.write_text(json.dumps({"metrics": {"combined_score": 0.9}}), encoding="utf-8")
         return OpenEvolveRunResult(
             success=True,

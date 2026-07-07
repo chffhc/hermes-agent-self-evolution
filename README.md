@@ -63,7 +63,17 @@ python -m evolution.code.evolve_tool_code \
     --engine openevolve \
     --iterations 3
 
-# Research fallback: Darwinian Evolver external CLI
+# Build a qwen3.6-plus code-review harness prompt for a diff
+python -m evolution.code.qwen_code_review_harness build-prompt \
+    --diff-file patch.diff \
+    --out review_prompt.md
+
+# Validate the lower-model review JSON with fail-closed rules
+python -m evolution.code.qwen_code_review_harness validate \
+    --response-file review_response.json \
+    --diff-file patch.diff
+
+# Research fallback: Darwinian Evolver external CLI (explicit opt-in; use only in an isolated worktree)
 python -m evolution.code.evolve_tool_code \
     --tool file_tools \
     --engine darwinian \
@@ -77,11 +87,38 @@ python -m evolution.monitor.continuous_evolution --cycle
 
 | Phase | Target | Engine | Status |
 |-------|--------|--------|--------|
-| **Phase 1** | Skill files (SKILL.md) | DSPy + GEPA | ✅ Implemented |
-| **Phase 2** | Tool descriptions | DSPy + GEPA | ✅ Implemented |
-| **Phase 3** | System prompt sections | DSPy + GEPA | ✅ Implemented |
-| **Phase 4** | Tool implementation code | OpenEvolve (primary), Darwinian Evolver (research fallback) | ✅ Runner prototype |
-| **Phase 5** | Continuous improvement loop | Automated pipeline | ✅ Implemented |
+| **Phase 1** | Skill files (SKILL.md) | DSPy + GEPA | ⚠️ Prototype — proxy eval; pytest gate available with `--run-tests` |
+| **Phase 2** | Tool descriptions | DSPy + GEPA | ⚠️ Prototype — proxy eval |
+| **Phase 3** | System prompt sections | DSPy + GEPA | ⚠️ Prototype — proxy eval, no direct prompt_builder write-back |
+| **Phase 4** | Tool implementation code | OpenEvolve (primary), Darwinian Evolver (research fallback) | ⚠️ Patch-only OpenEvolve prototype; Darwinian is explicit opt-in |
+| **Phase 5** | Continuous improvement loop | Automated pipeline | 🚧 Experimental — benchmark gate is fail-closed; no autonomous PR wiring yet |
+| **Review Harness** | qwen3.6-plus code review prompts + fail-closed JSON validation | Deterministic prompt/rubric/static-scan shell | ✅ Implemented |
+
+## Code Review Harness
+
+`evolution.code.qwen_code_review_harness` is an external skeleton for making `qwen3.6-plus` behave more like a stronger reviewer on narrow code-review tasks. It does not rely on qwen free-form judgment alone; it wraps the model with:
+
+- deterministic added-line static scans for secrets, shell injection, eval/exec, pickle, SQL interpolation, and path traversal;
+- mandatory `static_scan_dispositions` so qwen must confirm, clear as false positive, or escalate each scan hit instead of silently ignoring it;
+- a severity calibration rubric that separates P0/P1/P2/P3-style impact by trust boundary, default reachability, and preconditions;
+- a fixed review order: security → correctness → compatibility → error handling → concurrency/resources → tests → maintainability;
+- mechanism self-check reminders for common low-model mistakes such as `except Exception` vs `SystemExit` and `git checkout` branch pollution vs silent data loss;
+- injection hardening that treats the diff as data only;
+- a strict JSON schema for blockers and suggestions, including `severity_rationale`, `trust_boundary`, `preconditions`, and `confidence` on high/critical blockers;
+- fail-closed validation that flips `passed=false` whenever security or logic blockers exist, static-scan hits are confirmed/unreviewed, required fields are missing, evidence is not grounded in the reviewed diff, or output is not trustworthy JSON.
+
+Typical flow:
+
+```bash
+git diff > patch.diff
+python -m evolution.code.qwen_code_review_harness build-prompt \
+    --diff-file patch.diff \
+    --out review_prompt.md
+# Send review_prompt.md to qwen3.6-plus, save its JSON as review_response.json
+python -m evolution.code.qwen_code_review_harness validate \
+    --response-file review_response.json \
+    --diff-file patch.diff
+```
 
 ## Engines
 
@@ -91,14 +128,18 @@ python -m evolution.monitor.continuous_evolution --cycle
 | **[OpenEvolve](https://github.com/algorithmicsuperintelligence/openevolve)** | Code evolution from an initial program + evaluator; used in isolated scratch/worktree mode and returns patch artifacts only | Apache-2.0 |
 | **[Darwinian Evolver](https://github.com/imbue-ai/darwinian_evolver)** | Code evolution with Git-based organisms; research fallback only | AGPL v3 (external CLI only) |
 
-## Guardrails
+## Guardrails and current limitations
 
-Every evolved variant must pass:
-1. **Full test suite** — `pytest tests/ -q` must pass 100%
-2. **Size limits** — Skills ≤15KB, tool descriptions ≤500 chars
-3. **Caching compatibility** — No mid-conversation changes
-4. **Semantic preservation** — Must not drift from original purpose
-5. **PR review** — All changes go through human review, never direct commit
+Every evolved variant is intended to pass these gates before deployment, but the
+project is still a prototype. Treat generated scores as proxy signals until a
+real Hermes `batch_runner`/independent-judge evaluation is connected.
+
+Current hardening status:
+1. **Full test suite** — Phase 1 can run a pytest gate with `--run-tests`; CI now fails on lint/test failures.
+2. **Size limits** — Skills and tool descriptions are checked before output is accepted.
+3. **Benchmark gate** — benchmark errors/regressions are fail-closed by default.
+4. **Code evolution isolation** — the default Phase 4 engine is OpenEvolve patch-only; Darwinian Evolver is explicit opt-in and may mutate a checkout in place.
+5. **PR review** — PR generation helpers exist but are not yet wired into the main optimization flows; review generated artifacts manually.
 
 ## Full Plan
 
