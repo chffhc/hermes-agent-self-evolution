@@ -25,6 +25,7 @@ from rich.console import Console
 from rich.table import Table
 
 from evolution.core.config import EvolutionConfig, resolve_hermes_agent_path
+from evolution.core.errors import EvolutionError
 from evolution.core.utils import parse_json_array
 
 console = Console()
@@ -576,8 +577,7 @@ def evolve_tool_descriptions(
         dataset = builder.generate(tools, output_path=dataset_path_obj)
 
     if not dataset.examples:
-        console.print("[red]✗ No dataset examples generated[/red]")
-        sys.exit(1)
+        raise EvolutionError("No tool selection dataset examples generated")
 
     # ── 4. Evaluate baseline accuracy ───────────────────────────────────
     console.print("\n[bold]Step 4: Evaluating baseline tool selection[/bold]")
@@ -663,50 +663,65 @@ def evolve_tool_descriptions(
             output_dir = Path("output/tool_descriptions") / "extraction_FAILED"
             output_dir.mkdir(parents=True, exist_ok=True)
             (output_dir / "error.txt").write_text(str(e), encoding="utf-8")
-            console.print(f"[red]✗ Could not extract evolved tool descriptions: {e}[/red]")
             console.print(f"  Saved extraction error to {output_dir}/error.txt")
-            sys.exit(1)
+            raise EvolutionError(f"Could not extract evolved tool descriptions: {e}") from e
     else:
         evolved_tools = tools
 
     evolved_accuracy, evolved_per_tool = evaluator.evaluate(evolved_tools, dataset.holdout)
+
+    return finalize_tool_description_run(
+        num_tools=len(tools),
+        evolved_tools=evolved_tools,
+        baseline_descriptions=baseline_descriptions,
+        baseline_accuracy=baseline_accuracy,
+        evolved_accuracy=evolved_accuracy,
+        elapsed=elapsed,
+        iterations=iterations,
+        optimizer_model=optimizer_model,
+        eval_model=eval_model,
+        train_examples=len(dataset.train),
+        holdout_examples=len(dataset.holdout),
+    )
+
+
+def finalize_tool_description_run(
+    num_tools: int,
+    evolved_tools: list[ToolDescription],
+    baseline_descriptions: dict[str, str],
+    baseline_accuracy: float,
+    evolved_accuracy: float,
+    elapsed: float,
+    iterations: int,
+    optimizer_model: str,
+    eval_model: str,
+    train_examples: int,
+    holdout_examples: int,
+    output_root: Path = Path("output/tool_descriptions"),
+) -> dict:
+    """Validate, persist, and report an evolution run — failing closed.
+
+    Constraint violations still save artifacts/metrics for inspection, but the
+    run is marked non-deployable, saved under a ``_FAILED`` directory, and no
+    success is reported (or counted as an improvement by Phase 5).
+    """
     improvement = evolved_accuracy - baseline_accuracy
 
-    # ── 7. Validate constraints ─────────────────────────────────────────
+    # ── Validate constraints ────────────────────────────────────────────
     console.print("\n[bold]Step 6: Validating constraints[/bold]")
     violations = validate_tool_descriptions(evolved_tools)
+    deployable = not violations
     if violations:
         for v in violations:
             console.print(f"  [red]✗ {v['tool']}: {v['violation']}[/red]")
     else:
         console.print("  [green]✓ All constraints pass[/green]")
 
-    # ── 8. Report results ───────────────────────────────────────────────
-    table = Table(title="Tool Description Evolution Results")
-    table.add_column("Metric", style="bold")
-    table.add_column("Baseline", justify="right")
-    table.add_column("Evolved", justify="right")
-    table.add_column("Change", justify="right")
-
-    change_color = "green" if improvement > 0 else "yellow"
-    table.add_row(
-        "Selection Accuracy",
-        f"{baseline_accuracy:.1%}",
-        f"{evolved_accuracy:.1%}",
-        f"[{change_color}]{improvement:+.1%}[/{change_color}]",
-    )
-    table.add_row("Tools", "", str(len(tools)), "")
-    table.add_row("Time", "", f"{elapsed:.1f}s", "")
-
-    console.print()
-    console.print(table)
-
-    # ── 9. Save output ──────────────────────────────────────────────────
+    # ── Save output (failed runs are clearly marked) ────────────────────
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = Path("output/tool_descriptions") / timestamp
+    output_dir = output_root / (timestamp if deployable else f"{timestamp}_FAILED")
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Save evolved descriptions
     evolved_descriptions = {t.name: t.description for t in evolved_tools}
     (output_dir / "evolved_descriptions.json").write_text(
         json.dumps(evolved_descriptions, indent=2, ensure_ascii=False)
@@ -732,23 +747,54 @@ def evolve_tool_descriptions(
         "iterations": iterations,
         "optimizer_model": optimizer_model,
         "eval_model": eval_model,
-        "num_tools": len(tools),
+        "num_tools": num_tools,
         "baseline_accuracy": baseline_accuracy,
         "evolved_accuracy": evolved_accuracy,
         "improvement": improvement,
         "constraint_violations": violations,
+        "deployable": deployable,
         "elapsed_seconds": elapsed,
-        "train_examples": len(dataset.train),
-        "holdout_examples": len(dataset.holdout),
+        "train_examples": train_examples,
+        "holdout_examples": holdout_examples,
     }
     (output_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
 
     console.print(f"\n  Output saved to {output_dir}/")
 
+    if not deployable:
+        console.print(
+            "\n[bold red]✗ Evolved tool descriptions FAILED constraints — "
+            "not deployable[/bold red]"
+        )
+        console.print("  Failed artifacts saved above for inspection only.")
+        return metrics
+
+    # ── Report results (deployable runs only) ───────────────────────────
+    table = Table(title="Tool Description Evolution Results")
+    table.add_column("Metric", style="bold")
+    table.add_column("Baseline", justify="right")
+    table.add_column("Evolved", justify="right")
+    table.add_column("Change", justify="right")
+
+    change_color = "green" if improvement > 0 else "yellow"
+    table.add_row(
+        "Selection Accuracy",
+        f"{baseline_accuracy:.1%}",
+        f"{evolved_accuracy:.1%}",
+        f"[{change_color}]{improvement:+.1%}[/{change_color}]",
+    )
+    table.add_row("Tools", "", str(num_tools), "")
+    table.add_row("Time", "", f"{elapsed:.1f}s", "")
+
+    console.print()
+    console.print(table)
+
     if improvement > 0:
         console.print(f"\n[bold green]✓ Tool selection improved by {improvement:+.1%}[/bold green]")
     else:
         console.print(f"\n[yellow]⚠ No improvement in tool selection ({improvement:+.1%})[/yellow]")
+
+    return metrics
 
 
 @click.command()
@@ -761,15 +807,19 @@ def evolve_tool_descriptions(
 @click.option("--dry-run", is_flag=True, help="Validate setup without running")
 def main(iterations, optimizer_model, eval_model, hermes_repo, tool, dataset_path, dry_run):
     """Evolve tool descriptions using DSPy + GEPA optimization."""
-    evolve_tool_descriptions(
-        iterations=iterations,
-        optimizer_model=optimizer_model,
-        eval_model=eval_model,
-        hermes_repo=hermes_repo,
-        tool_filter=list(tool) if tool else None,
-        dataset_path=dataset_path,
-        dry_run=dry_run,
-    )
+    try:
+        evolve_tool_descriptions(
+            iterations=iterations,
+            optimizer_model=optimizer_model,
+            eval_model=eval_model,
+            hermes_repo=hermes_repo,
+            tool_filter=list(tool) if tool else None,
+            dataset_path=dataset_path,
+            dry_run=dry_run,
+        )
+    except EvolutionError as e:
+        console.print(f"[red]✗ {e}[/red]")
+        raise SystemExit(1) from e
 
 
 if __name__ == "__main__":

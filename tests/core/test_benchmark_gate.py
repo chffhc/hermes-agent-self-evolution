@@ -36,3 +36,39 @@ def test_benchmark_gate_can_explicitly_skip_errors_for_diagnostics(tmp_path):
 
     assert result.passed
     assert result.regressions == []
+
+
+def test_benchmark_gate_fails_closed_on_missing_baseline(tmp_path):
+    gate = BenchmarkGate(hermes_agent_path=tmp_path, baseline_file=tmp_path / "baselines.json")
+    result = BenchmarkResult(
+        name="tblite-fast",
+        score=0.9,
+        total_tasks=10,
+        passed_tasks=9,
+        failed_tasks=1,
+        elapsed_seconds=0.1,
+        timestamp=datetime.now().isoformat(),
+    )
+
+    gate_result = gate.check_gate([result])
+
+    assert not gate_result.passed
+    assert "no stored baseline" in gate_result.regressions[0]
+
+
+def test_benchmark_gate_missing_baseline_escape_hatch_is_explicit(tmp_path):
+    gate = BenchmarkGate(hermes_agent_path=tmp_path, baseline_file=tmp_path / "baselines.json")
+    result = BenchmarkResult(
+        name="tblite-fast",
+        score=0.9,
+        total_tasks=10,
+        passed_tasks=9,
+        failed_tasks=1,
+        elapsed_seconds=0.1,
+        timestamp=datetime.now().isoformat(),
+    )
+
+    gate_result = gate.check_gate([result], require_baseline=False)
+
+    assert gate_result.passed
+    assert gate_result.regressions == []

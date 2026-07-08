@@ -487,6 +487,7 @@ class RelevanceFilter:
         skill_name: str,
         skill_text: str,
         max_examples: int = 50,
+        pad_with_unrelated: bool = False,
     ) -> list[EvalExample]:
         """Filter messages by relevance and generate eval examples.
 
@@ -495,6 +496,11 @@ class RelevanceFilter:
             skill_name: Name of the target skill.
             skill_text: Full text of the SKILL.md file.
             max_examples: Maximum eval examples to produce.
+            pad_with_unrelated: If True, when the heuristic pre-filter finds
+                fewer than ``max_examples`` candidates, randomly sample messages
+                that did NOT pass the pre-filter and send them to the LLM too.
+                Off by default: it ships unrelated session history to the
+                scoring model, which is both a privacy and a cost concern.
 
         Returns:
             List of EvalExample objects for relevant messages.
@@ -509,8 +515,8 @@ class RelevanceFilter:
             m for m in messages if _is_relevant_to_skill(m["task_input"], skill_name, skill_text)
         ]
 
-        # If heuristics found too few, sample remaining messages
-        if len(candidates) < max_examples:
+        # Optionally pad with unrelated messages (opt-in, see docstring)
+        if pad_with_unrelated and len(candidates) < max_examples:
             candidate_ids = {id(m) for m in candidates}
             remaining = [m for m in messages if id(m) not in candidate_ids]
             random.shuffle(remaining)
@@ -650,6 +656,7 @@ def build_dataset_from_external(
     output_path: Path,
     model: str,
     max_examples: int = 50,
+    pad_with_unrelated: bool = False,
 ) -> EvalDataset:
     """Extract messages from external tools, filter for relevance, and save.
 
@@ -697,6 +704,7 @@ def build_dataset_from_external(
         skill_name,
         skill_text,
         max_examples=max_examples,
+        pad_with_unrelated=pad_with_unrelated,
     )
 
     console.print(f"\n[bold green]Found {len(examples)} relevant examples[/bold green]")
@@ -793,8 +801,16 @@ def _load_skill_text(skill_name: str, skills_dir: Path | None = None) -> tuple[s
     help="LiteLLM model string for relevance scoring",
 )
 @click.option("--max-examples", default=50, help="Max eval examples to generate")
+@click.option(
+    "--pad-with-unrelated",
+    is_flag=True,
+    help=(
+        "If the heuristic pre-filter finds too few candidates, also send randomly "
+        "sampled unrelated session messages to the LLM for scoring (privacy/cost tradeoff)"
+    ),
+)
 @click.option("--dry-run", is_flag=True, help="Show message counts without LLM scoring")
-def main(source, skill, output, model, max_examples, dry_run):
+def main(source, skill, output, model, max_examples, pad_with_unrelated, dry_run):
     """Import external session data into golden eval datasets for self-evolution."""
     console.print(
         f"\n[bold cyan]External Session Importer[/bold cyan] — skill: [bold]{skill}[/bold]\n"
@@ -834,6 +850,7 @@ def main(source, skill, output, model, max_examples, dry_run):
         output_path=output,
         model=model,
         max_examples=max_examples,
+        pad_with_unrelated=pad_with_unrelated,
     )
 
 

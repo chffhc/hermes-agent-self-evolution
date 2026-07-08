@@ -702,14 +702,40 @@ class TestRelevanceFilter:
             messages, "categorize", "Sort text into topics. Categorize content.", max_examples=10
         )
 
+        # By default, only messages that pass the cheap relevance pre-filter are
+        # sent to the LLM scorer; unrelated session history is not padded in.
+        assert len(examples) == 1
+        assert examples[0].task_input == "categorize my emails please"
+        assert examples[0].expected_behavior == "group by topic"
+        assert examples[0].difficulty == "easy"
+
+    def test_unrelated_padding_is_explicit_opt_in(self, mock_dspy):
+        rf = RelevanceFilter.__new__(RelevanceFilter)
+        rf.model = "test-model"
+
+        rf.scorer = MagicMock()
+        rf.scorer.return_value = SimpleNamespace(
+            scoring='{"relevant": true, "expected_behavior": "group by topic", "difficulty": "easy", "category": "sorting"}'
+        )
+
+        messages = [
+            {"task_input": "sort these messages by topic", "source": "claude-code"},
+            {"task_input": "categorize my emails please", "source": "copilot"},
+        ]
+
+        examples = rf.filter_and_score(
+            messages,
+            "categorize",
+            "Sort text into topics. Categorize content.",
+            max_examples=10,
+            pad_with_unrelated=True,
+        )
+
         assert len(examples) == 2
-        inputs = {ex.task_input for ex in examples}
-        assert "sort these messages by topic" in inputs
-        assert "categorize my emails please" in inputs
-        # All examples should have the scoring metadata
-        for ex in examples:
-            assert ex.expected_behavior == "group by topic"
-            assert ex.difficulty == "easy"
+        assert {ex.task_input for ex in examples} == {
+            "sort these messages by topic",
+            "categorize my emails please",
+        }
 
     def test_irrelevant_messages_filtered_out(self, mock_dspy):
         rf = RelevanceFilter.__new__(RelevanceFilter)
@@ -1194,7 +1220,7 @@ class TestValidationIntegration:
         )
 
         messages = [
-            {"task_input": "sort these messages by topic", "source": "claude-code"},
+            {"task_input": "categorize these messages by topic", "source": "claude-code"},
         ]
 
         examples = rf.filter_and_score(

@@ -20,7 +20,6 @@ Usage:
 """
 
 import json
-import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -32,6 +31,7 @@ from rich.console import Console
 from rich.table import Table
 
 from evolution.core.config import EvolutionConfig, resolve_hermes_agent_path
+from evolution.core.errors import EvolutionError
 from evolution.core.utils import parse_json_array
 
 console = Console()
@@ -611,8 +611,7 @@ def evolve_prompt_section(
 
     sections = extract_prompt_sections(hermes_agent_path, target_sections)
     if not sections:
-        console.print("[red]✗ No sections found[/red]")
-        sys.exit(1)
+        raise EvolutionError(f"No prompt sections found in {hermes_agent_path}")
 
     console.print(f"  Extracted {len(sections)} sections")
 
@@ -644,8 +643,7 @@ def evolve_prompt_section(
         console.print(f"  Generated {len(dataset.examples)} behavioral tests")
 
     if not dataset.examples:
-        console.print("[red]✗ No test examples generated[/red]")
-        sys.exit(1)
+        raise EvolutionError("No behavioral test examples generated")
 
     # ── 4. Evaluate baseline behavior ───────────────────────────────────
     console.print("\n[bold]Step 4: Evaluating baseline behavior[/bold]")
@@ -730,25 +728,85 @@ def evolve_prompt_section(
             output_dir = Path("output/prompt_sections") / "extraction_FAILED"
             output_dir.mkdir(parents=True, exist_ok=True)
             (output_dir / "error.txt").write_text(str(e), encoding="utf-8")
-            console.print(f"[red]✗ Could not extract evolved prompt sections: {e}[/red]")
             console.print(f"  Saved extraction error to {output_dir}/error.txt")
-            sys.exit(1)
+            raise EvolutionError(f"Could not extract evolved prompt sections: {e}") from e
     else:
         evolved_sections = sections
 
     evolved_score, evolved_per_section = evaluator.evaluate(evolved_sections, dataset.holdout)
+
+    return finalize_prompt_section_run(
+        sections=sections,
+        evolved_sections=evolved_sections,
+        baseline_sections=baseline_sections,
+        baseline_score=baseline_score,
+        evolved_score=evolved_score,
+        elapsed=elapsed,
+        iterations=iterations,
+    )
+
+
+def finalize_prompt_section_run(
+    sections: list[PromptSection],
+    evolved_sections: list[PromptSection],
+    baseline_sections: list[PromptSection],
+    baseline_score: float,
+    evolved_score: float,
+    elapsed: float,
+    iterations: int,
+    output_root: Path = Path("output/prompt_sections"),
+) -> dict:
+    """Validate, persist, and report an evolution run — failing closed.
+
+    Constraint violations still save artifacts/metrics for inspection, but the
+    run is marked non-deployable, saved under a ``_FAILED`` directory, and no
+    success is reported (or counted as an improvement by Phase 5).
+    """
     improvement = evolved_score - baseline_score
 
-    # ── 7. Validate constraints ─────────────────────────────────────────
+    # ── Validate constraints ────────────────────────────────────────────
     console.print("\n[bold]Step 6: Validating constraints[/bold]")
     violations = validate_prompt_sections(evolved_sections, baseline_sections)
+    deployable = not violations
     if violations:
         for v in violations:
             console.print(f"  [red]✗ {v['section']}: {v['violation']}[/red]")
     else:
         console.print("  [green]✓ All constraints pass[/green]")
 
-    # ── 8. Report ───────────────────────────────────────────────────────
+    # ── Save output (failed runs are clearly marked) ────────────────────
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_dir = output_root / (timestamp if deployable else f"{timestamp}_FAILED")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    for section in evolved_sections:
+        (output_dir / f"evolved_{section.name}.txt").write_text(section.content)
+    for section in baseline_sections:
+        (output_dir / f"baseline_{section.name}.txt").write_text(section.content)
+
+    metrics = {
+        "timestamp": timestamp,
+        "iterations": iterations,
+        "sections": [s.name for s in sections],
+        "baseline_score": baseline_score,
+        "evolved_score": evolved_score,
+        "improvement": improvement,
+        "constraint_violations": violations,
+        "deployable": deployable,
+        "elapsed_seconds": elapsed,
+    }
+    (output_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
+
+    console.print(f"\n  Output saved to {output_dir}/")
+
+    if not deployable:
+        console.print(
+            "\n[bold red]✗ Evolved prompt sections FAILED constraints — not deployable[/bold red]"
+        )
+        console.print("  Failed artifacts saved above for inspection only.")
+        return metrics
+
+    # ── Report (deployable runs only) ───────────────────────────────────
     table = Table(title="Prompt Section Evolution Results")
     table.add_column("Metric", style="bold")
     table.add_column("Baseline", justify="right")
@@ -768,36 +826,14 @@ def evolve_prompt_section(
     console.print()
     console.print(table)
 
-    # ── 9. Save output ──────────────────────────────────────────────────
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = Path("output/prompt_sections") / timestamp
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    for section in evolved_sections:
-        (output_dir / f"evolved_{section.name}.txt").write_text(section.content)
-    for section in baseline_sections:
-        (output_dir / f"baseline_{section.name}.txt").write_text(section.content)
-
-    metrics = {
-        "timestamp": timestamp,
-        "iterations": iterations,
-        "sections": [s.name for s in sections],
-        "baseline_score": baseline_score,
-        "evolved_score": evolved_score,
-        "improvement": improvement,
-        "constraint_violations": violations,
-        "elapsed_seconds": elapsed,
-    }
-    (output_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
-
-    console.print(f"\n  Output saved to {output_dir}/")
-
     if improvement > 0:
         console.print(
             f"\n[bold green]✓ Prompt behavior improved by {improvement:+.3f}[/bold green]"
         )
     else:
         console.print(f"\n[yellow]⚠ No improvement ({improvement:+.3f})[/yellow]")
+
+    return metrics
 
 
 @click.command()
@@ -810,15 +846,19 @@ def evolve_prompt_section(
 @click.option("--dry-run", is_flag=True, help="Validate setup without running")
 def main(section, iterations, optimizer_model, eval_model, hermes_repo, dataset_path, dry_run):
     """Evolve system prompt sections using DSPy + GEPA optimization."""
-    evolve_prompt_section(
-        section_name=section,
-        iterations=iterations,
-        optimizer_model=optimizer_model,
-        eval_model=eval_model,
-        hermes_repo=hermes_repo,
-        dataset_path=dataset_path,
-        dry_run=dry_run,
-    )
+    try:
+        evolve_prompt_section(
+            section_name=section,
+            iterations=iterations,
+            optimizer_model=optimizer_model,
+            eval_model=eval_model,
+            hermes_repo=hermes_repo,
+            dataset_path=dataset_path,
+            dry_run=dry_run,
+        )
+    except EvolutionError as e:
+        console.print(f"[red]✗ {e}[/red]")
+        raise SystemExit(1) from e
 
 
 if __name__ == "__main__":

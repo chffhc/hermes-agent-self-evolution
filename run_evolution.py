@@ -1,10 +1,12 @@
 #!/usr/bin/env python
 """Run evolution with CLI arguments."""
+
 import os
 import sys
 
 import click
 
+from evolution.core.errors import EvolutionError
 from evolution.skills.evolve_skill import evolve
 
 # Force unbuffered output
@@ -52,7 +54,11 @@ def main(skill, iterations, eval_source, dataset_path, optimizer_model, eval_mod
     if dataset_path:
         kwargs["dataset_path"] = dataset_path
 
-    evolve(**kwargs)
+    try:
+        evolve(**kwargs)
+    except EvolutionError as e:
+        print(f"✗ {e}", flush=True)
+        raise SystemExit(1) from e
 
     # Auto-diff: show the difference between baseline and evolved skill
     _print_diff(skill)
@@ -85,9 +91,7 @@ def _print_diff(skill_name: str):
     evolved = evolved_file.read_text().splitlines()
 
     diff = list(
-        difflib.unified_diff(
-            baseline, evolved, fromfile="baseline", tofile="evolved", lineterm=""
-        )
+        difflib.unified_diff(baseline, evolved, fromfile="baseline", tofile="evolved", lineterm="")
     )
 
     if diff:

@@ -3,7 +3,7 @@
 import pytest
 
 from evolution.core.config import EvolutionConfig
-from evolution.core.constraints import ConstraintValidator
+from evolution.core.constraints import ConstraintResult, ConstraintValidator
 
 
 @pytest.fixture
@@ -85,6 +85,55 @@ class TestSkillStructure:
         skill = "---\nname: test-skill\n---\n\n# Test"
         result = validator._check_skill_structure(skill)
         assert not result.passed
+
+
+class TestRunTestSuite:
+    def test_repo_sanity_mode_does_not_claim_artifact_gate(self, validator, tmp_path, monkeypatch):
+        def fake_run_pytest(repo, constraint_name):
+            assert repo == tmp_path
+            return ConstraintResult(True, constraint_name, "All tests passed")
+
+        monkeypatch.setattr(validator, "_run_pytest", fake_run_pytest)
+
+        result = validator.run_test_suite(tmp_path)
+
+        assert result.passed
+        assert result.constraint_name == "repo_sanity_test_suite"
+        assert "evolved artifact was NOT applied" in result.message
+
+    def test_artifact_gate_applies_artifact_in_temp_workspace(
+        self, validator, tmp_path, monkeypatch
+    ):
+        skill_path = tmp_path / "skills" / "demo" / "SKILL.md"
+        skill_path.parent.mkdir(parents=True)
+        skill_path.write_text("baseline", encoding="utf-8")
+        (tmp_path / "tests").mkdir()
+
+        def fake_run_pytest(repo, constraint_name):
+            assert repo != tmp_path
+            assert constraint_name == "artifact_test_suite"
+            assert (repo / "skills" / "demo" / "SKILL.md").read_text(encoding="utf-8") == "evolved"
+            return ConstraintResult(True, constraint_name, "All tests passed")
+
+        monkeypatch.setattr(validator, "_run_pytest", fake_run_pytest)
+
+        result = validator.run_test_suite(
+            tmp_path,
+            artifact_relpath="skills/demo/SKILL.md",
+            artifact_text="evolved",
+        )
+
+        assert result.passed
+        assert result.constraint_name == "artifact_test_suite"
+        assert "evolved artifact applied" in result.message
+        assert skill_path.read_text(encoding="utf-8") == "baseline"
+
+    def test_artifact_gate_rejects_partial_artifact_arguments(self, validator, tmp_path):
+        result = validator.run_test_suite(tmp_path, artifact_relpath="skills/demo/SKILL.md")
+
+        assert not result.passed
+        assert result.constraint_name == "artifact_test_suite"
+        assert "Both artifact_relpath and artifact_text are required" in result.message
 
 
 class TestValidateAll:

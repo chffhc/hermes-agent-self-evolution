@@ -426,9 +426,13 @@ class ContinuousEvolution:
 
     1. Scan performance metrics
     2. Triage to find targets
-    3. Run optimization on top targets
-    4. Validate with benchmarks
-    5. Create PRs for improvements
+    3. Run the benchmark gate as a PRE-optimization environment health check
+    4. Run optimization on top targets (artifacts saved for human review)
+
+    Note the limits: evolved artifacts are NOT benchmark-validated by this
+    cycle (they are never applied to the live checkout, so re-running the
+    benchmark would not measure them), and no PRs are created automatically.
+    Benchmark validation and deployment remain manual, human-reviewed steps.
 
     Supports checkpoint/resume: if a cycle is interrupted, the next
     run picks up where it left off.
@@ -494,6 +498,27 @@ class ContinuousEvolution:
         if self.checkpoint_file.exists():
             self.checkpoint_file.unlink()
 
+    @staticmethod
+    def _read_latest_run_metrics(output_dir: Path, result: dict) -> None:
+        """Fill ``result`` from the newest run's metrics.json under ``output_dir``.
+
+        A run only counts as success when it improved AND passed its constraint
+        gates (``deployable``, written by Phase 2/3; defaults to True for
+        metrics that predate the flag).
+        """
+        if not output_dir.exists():
+            return
+        subdirs = sorted(output_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
+        if not subdirs:
+            return
+        metrics_file = subdirs[0] / "metrics.json"
+        if not metrics_file.exists():
+            return
+        metrics = json.loads(metrics_file.read_text())
+        result["improvement"] = metrics.get("improvement", 0.0)
+        result["output_dir"] = str(subdirs[0])
+        result["success"] = metrics.get("improvement", 0.0) > 0 and metrics.get("deployable", True)
+
     def _optimize_target(self, target) -> dict:
         """Dispatch optimization to the appropriate Phase 1/2/3 function.
 
@@ -520,18 +545,7 @@ class ContinuousEvolution:
                     run_tests=True,
                 )
                 # Check output directory for the latest run
-                output_dir = Path("output") / target.target_name
-                if output_dir.exists():
-                    subdirs = sorted(
-                        output_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True
-                    )
-                    if subdirs:
-                        metrics_file = subdirs[0] / "metrics.json"
-                        if metrics_file.exists():
-                            metrics = json.loads(metrics_file.read_text())
-                            result["improvement"] = metrics.get("improvement", 0.0)
-                            result["output_dir"] = str(subdirs[0])
-                            result["success"] = metrics.get("improvement", 0.0) > 0
+                self._read_latest_run_metrics(Path("output") / target.target_name, result)
                 logger.info(
                     "Skill %s: improvement=%+.3f success=%s",
                     target.target_name,
@@ -558,18 +572,7 @@ class ContinuousEvolution:
                     hermes_repo=str(self.hermes_agent_path),
                     tool_filter=[target.target_name],
                 )
-                output_dir = Path("output/tool_descriptions")
-                if output_dir.exists():
-                    subdirs = sorted(
-                        output_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True
-                    )
-                    if subdirs:
-                        mf = subdirs[0] / "metrics.json"
-                        if mf.exists():
-                            metrics = json.loads(mf.read_text())
-                            result["improvement"] = metrics.get("improvement", 0.0)
-                            result["output_dir"] = str(subdirs[0])
-                            result["success"] = metrics.get("improvement", 0.0) > 0
+                self._read_latest_run_metrics(Path("output/tool_descriptions"), result)
                 logger.info(
                     "Tool %s: improvement=%+.3f success=%s",
                     target.target_name,
@@ -596,18 +599,7 @@ class ContinuousEvolution:
                     eval_model=self.optimizer_model,
                     hermes_repo=str(self.hermes_agent_path),
                 )
-                output_dir = Path("output/prompt_sections")
-                if output_dir.exists():
-                    subdirs = sorted(
-                        output_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True
-                    )
-                    if subdirs:
-                        mf = subdirs[0] / "metrics.json"
-                        if mf.exists():
-                            metrics = json.loads(mf.read_text())
-                            result["improvement"] = metrics.get("improvement", 0.0)
-                            result["output_dir"] = str(subdirs[0])
-                            result["success"] = metrics.get("improvement", 0.0) > 0
+                self._read_latest_run_metrics(Path("output/prompt_sections"), result)
                 logger.info(
                     "Prompt section %s: improvement=%+.3f success=%s",
                     target.target_name,
@@ -694,7 +686,10 @@ class ContinuousEvolution:
 
         # ── Step 3: Run benchmarks (gate) ───────────────────────────────
         if self.benchmark_gate:
-            logger.info("Step 3: Running benchmark gate")
+            logger.info(
+                "Step 3: Running benchmark gate (pre-optimization health check — "
+                "evolved artifacts are not benchmark-validated by this cycle)"
+            )
             # Try the fast benchmarks as a regression check
             try:
                 fast_result = self.benchmarks.run_tblite_fast()

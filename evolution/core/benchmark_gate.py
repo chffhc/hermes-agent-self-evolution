@@ -234,12 +234,20 @@ class BenchmarkGate:
         results: list[BenchmarkResult],
         max_regression: float | None = None,
         fail_on_error: bool = True,
+        require_baseline: bool = True,
     ) -> GateResult:
         """Check if all benchmark gates pass (no significant regression).
+
+        Fails closed: a result with no stored baseline cannot prove absence of
+        regression, so it fails the gate unless ``require_baseline=False`` is
+        passed explicitly (diagnostic escape hatch only).
 
         Args:
             results: List of benchmark results to check
             max_regression: Override default max regression threshold
+            fail_on_error: Treat benchmark errors as gate failures (default True)
+            require_baseline: Treat a missing stored baseline as a gate failure
+                (default True)
         """
         threshold = max_regression if max_regression is not None else self.max_regression
         regressions = []
@@ -251,13 +259,21 @@ class BenchmarkGate:
                 continue
 
             baseline = self.baseline_scores.get(r.name)
-            if baseline is not None:
-                drop = baseline - r.score
-                if drop > threshold:
+            if baseline is None:
+                if require_baseline:
                     regressions.append(
-                        f"{r.name}: {baseline:.3f} → {r.score:.3f} "
-                        f"(drop {drop:.3f}, max allowed {threshold:.3f})"
+                        f"{r.name}: no stored baseline — cannot verify regression, "
+                        f"failing closed (run establish_baselines() first, or pass "
+                        f"require_baseline=False for diagnostics)"
                     )
+                continue
+
+            drop = baseline - r.score
+            if drop > threshold:
+                regressions.append(
+                    f"{r.name}: {baseline:.3f} → {r.score:.3f} "
+                    f"(drop {drop:.3f}, max allowed {threshold:.3f})"
+                )
 
         return GateResult(
             passed=len(regressions) == 0,

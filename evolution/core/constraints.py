@@ -4,12 +4,27 @@ Every candidate variant must pass ALL constraints before it can be
 considered valid. Failed constraints = immediate rejection.
 """
 
+import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
 from evolution.core.config import EvolutionConfig
+
+# Directories that are never needed to run the test suite and can be huge.
+_WORKSPACE_COPY_IGNORE = shutil.ignore_patterns(
+    ".git",
+    "venv",
+    ".venv",
+    "node_modules",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".tox",
+)
 
 
 @dataclass
@@ -53,21 +68,89 @@ class ConstraintValidator:
 
         return results
 
-    def run_test_suite(self, hermes_repo: Path) -> ConstraintResult:
-        """Run the full hermes-agent test suite. Must pass 100%."""
+    def run_test_suite(
+        self,
+        hermes_repo: Path,
+        artifact_relpath: str | Path | None = None,
+        artifact_text: str | None = None,
+    ) -> ConstraintResult:
+        """Run the hermes-agent test suite, optionally with an evolved artifact applied.
+
+        When ``artifact_relpath`` and ``artifact_text`` are both given, the repo is
+        copied to a temporary workspace, the evolved artifact is written over the
+        file at ``artifact_relpath`` inside that copy, and pytest runs against the
+        copy. This is a real artifact-then-test gate: the evolved content is what
+        gets tested, and the live checkout is never touched.
+
+        Without an artifact, this is only a *repo sanity check* — it proves the
+        pristine checkout's tests pass, and says nothing about the evolved artifact.
+        The constraint name reflects which mode ran.
+        """
+        if (artifact_relpath is None) != (artifact_text is None):
+            return ConstraintResult(
+                passed=False,
+                constraint_name="artifact_test_suite",
+                message=(
+                    "Both artifact_relpath and artifact_text are required to test "
+                    "an evolved artifact — refusing to run a misleading gate"
+                ),
+            )
+
+        if artifact_relpath is None:
+            result = self._run_pytest(hermes_repo, "repo_sanity_test_suite")
+            if result.passed:
+                result.message = (
+                    "Repo tests passed (sanity check only — evolved artifact was NOT applied)"
+                )
+            return result
+
+        try:
+            with tempfile.TemporaryDirectory(prefix="hermes_artifact_gate_") as tmp:
+                workspace = Path(tmp) / "workspace"
+                shutil.copytree(
+                    hermes_repo,
+                    workspace,
+                    ignore=_WORKSPACE_COPY_IGNORE,
+                    symlinks=True,
+                )
+                target = (workspace / artifact_relpath).resolve()
+                if not target.is_relative_to(workspace.resolve()):
+                    return ConstraintResult(
+                        passed=False,
+                        constraint_name="artifact_test_suite",
+                        message=f"Artifact path escapes workspace: {artifact_relpath}",
+                    )
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(artifact_text, encoding="utf-8")
+
+                result = self._run_pytest(workspace, "artifact_test_suite")
+                if result.passed:
+                    result.message = (
+                        "All tests passed with evolved artifact applied in temp workspace"
+                    )
+                return result
+        except Exception as e:
+            return ConstraintResult(
+                passed=False,
+                constraint_name="artifact_test_suite",
+                message=f"Failed to prepare artifact test workspace: {e}",
+            )
+
+    def _run_pytest(self, repo: Path, constraint_name: str) -> ConstraintResult:
+        """Run pytest in ``repo``. Must pass 100%."""
         try:
             result = subprocess.run(
                 [sys.executable, "-m", "pytest", "tests/", "-q", "--tb=no"],
                 capture_output=True,
                 text=True,
                 timeout=300,
-                cwd=str(hermes_repo),
+                cwd=str(repo),
             )
 
             if result.returncode == 0:
                 return ConstraintResult(
                     passed=True,
-                    constraint_name="test_suite",
+                    constraint_name=constraint_name,
                     message="All tests passed",
                     details=result.stdout.strip().split("\n")[-1] if result.stdout else "",
                 )
@@ -76,20 +159,20 @@ class ConstraintValidator:
                 last_lines = result.stdout.strip().split("\n")[-5:] if result.stdout else []
                 return ConstraintResult(
                     passed=False,
-                    constraint_name="test_suite",
+                    constraint_name=constraint_name,
                     message="Test suite failed",
                     details="\n".join(last_lines),
                 )
         except subprocess.TimeoutExpired:
             return ConstraintResult(
                 passed=False,
-                constraint_name="test_suite",
+                constraint_name=constraint_name,
                 message="Test suite timed out (300s)",
             )
         except Exception as e:
             return ConstraintResult(
                 passed=False,
-                constraint_name="test_suite",
+                constraint_name=constraint_name,
                 message=f"Failed to run tests: {e}",
             )
 

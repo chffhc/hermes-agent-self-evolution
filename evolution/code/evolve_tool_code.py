@@ -30,6 +30,7 @@ from evolution.code.openevolve_runner import (
     run_openevolve_isolated,
 )
 from evolution.core.config import get_hermes_agent_path
+from evolution.core.errors import EvolutionError
 
 console = Console()
 
@@ -354,6 +355,42 @@ def validate_code_constraints(
     return violations
 
 
+def ensure_clean_git_checkout(repo_path: Path) -> tuple[bool, str]:
+    """Verify ``repo_path`` is a git checkout with no uncommitted changes.
+
+    The Darwinian engine mutates the checkout in place, so we must be able to
+    prove the tree was clean before evolution (and thus revertable). Fails
+    closed: a non-git directory or any git error counts as unclean.
+
+    Returns (ok, reason).
+    """
+    try:
+        inside = subprocess.run(
+            ["git", "-C", str(repo_path), "rev-parse", "--is-inside-work-tree"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if inside.returncode != 0 or inside.stdout.strip() != "true":
+            return False, f"{repo_path} is not a git repository — cannot verify clean state"
+
+        status = subprocess.run(
+            ["git", "-C", str(repo_path), "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if status.returncode != 0:
+            return False, f"git status failed: {status.stderr.strip()}"
+        if status.stdout.strip():
+            dirty = status.stdout.strip().splitlines()
+            preview = ", ".join(line.strip() for line in dirty[:5])
+            return False, f"working tree has {len(dirty)} uncommitted change(s): {preview}"
+        return True, "clean"
+    except Exception as e:
+        return False, f"failed to check git state: {e}"
+
+
 # ── Darwinian Evolver integration ───────────────────────────────────────
 
 
@@ -601,13 +638,20 @@ def evolve_tool_code(
             "[bold yellow]⚠ Darwinian mode can mutate the target Hermes checkout in place. "
             "Prefer the default openevolve engine unless running in an isolated worktree.[/bold yellow]"
         )
+        # Fail fast on a dirty (or unverifiable) checkout — in-place mutation
+        # is only safe when the pre-evolution state is provably restorable.
+        clean, reason = ensure_clean_git_checkout(hermes_agent_path)
+        if not clean:
+            raise EvolutionError(
+                f"Refusing to run darwinian engine on {hermes_agent_path}: {reason}. "
+                "Commit/stash changes or use the openevolve engine (patch-only)."
+            )
 
     # ── 1. Wrap tool as organism ────────────────────────────────────────
     console.print("[bold]Step 1: Wrapping tool as organism[/bold]")
     organism = wrap_tool_as_organism(tool_name, hermes_agent_path)
     if not organism:
-        console.print(f"[red]✗ Could not find tool '{tool_name}'[/red]")
-        sys.exit(1)
+        raise EvolutionError(f"Could not find tool '{tool_name}' in {hermes_agent_path / 'tools'}")
 
     console.print(f"  File: {organism.file_path.relative_to(hermes_agent_path)}")
     console.print(f"  Functions: {len(organism.function_signatures)}")
@@ -672,20 +716,49 @@ def evolve_tool_code(
     # ── 4. Validate evolved code ────────────────────────────────────────
     console.print("\n[bold]Step 4: Validating evolved code[/bold]")
 
-    violations = validate_code_constraints(
-        tool_name, hermes_agent_path, original_file=original_content
-    )
-
-    if violations:
-        for v in violations:
-            console.print(f"  [red]✗ {v['violation']}[/red]")
-        console.print("\n[red]✗ Evolved code FAILED safety constraints — reverting[/red]")
-
-        # Revert changes
+    def _revert_and_save_failed(reason: str, details: str = ""):
+        """Restore the original tool file and keep the failed variant for review."""
+        evolved_content = organism.file_path.read_text()
         organism.file_path.write_text(original_content)
-        return
+        failed_dir = Path("output/code_evolution") / (
+            f"{tool_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_FAILED"
+        )
+        failed_dir.mkdir(parents=True, exist_ok=True)
+        (failed_dir / "evolved_code_FAILED.py").write_text(evolved_content)
+        (failed_dir / "failure_reason.txt").write_text(f"{reason}\n\n{details}".strip() + "\n")
+        console.print(f"[red]✗ {reason} — reverted original tool code[/red]")
+        console.print(f"  Failed variant saved to {failed_dir}/ for inspection")
 
-    console.print("  [green]✓ All safety constraints pass[/green]")
+    try:
+        violations = validate_code_constraints(
+            tool_name, hermes_agent_path, original_file=original_content
+        )
+
+        if violations:
+            for v in violations:
+                console.print(f"  [red]✗ {v['violation']}[/red]")
+            _revert_and_save_failed(
+                "Evolved code FAILED safety constraints",
+                "\n".join(v["violation"] for v in violations),
+            )
+            return
+
+        console.print("  [green]✓ All safety constraints pass[/green]")
+
+        # Test failure must revert just like a constraint failure — never
+        # leave failing evolved code in the live checkout.
+        post_tests_passed, post_test_output = run_pytest_for_tool(
+            tool_name, hermes_agent_path, organism.test_files or None
+        )
+        if not post_tests_passed:
+            _revert_and_save_failed("Evolved code FAILED the test suite", post_test_output)
+            return
+        console.print("  [green]✓ Tests pass with evolved code[/green]")
+    except Exception:
+        # Any unexpected error during validation: restore the checkout first.
+        organism.file_path.write_text(original_content)
+        console.print("[red]✗ Validation errored — reverted original tool code[/red]")
+        raise
 
     # ── 5. Report ───────────────────────────────────────────────────────
     evolved_fitness, evolved_scores = evaluate_code_fitness(tool_name, hermes_agent_path)
@@ -737,16 +810,20 @@ def evolve_tool_code(
 )
 def main(tool, iterations, bug_issue, hermes_repo, dry_run, engine, output_root, openevolve_cmd):
     """Evolve tool implementation code using a selected evolution engine."""
-    evolve_tool_code(
-        tool_name=tool,
-        iterations=iterations,
-        bug_issue=bug_issue,
-        hermes_repo=hermes_repo,
-        dry_run=dry_run,
-        engine=engine,
-        output_root=output_root,
-        openevolve_cmd=openevolve_cmd,
-    )
+    try:
+        evolve_tool_code(
+            tool_name=tool,
+            iterations=iterations,
+            bug_issue=bug_issue,
+            hermes_repo=hermes_repo,
+            dry_run=dry_run,
+            engine=engine,
+            output_root=output_root,
+            openevolve_cmd=openevolve_cmd,
+        )
+    except EvolutionError as e:
+        console.print(f"[red]✗ {e}[/red]")
+        raise SystemExit(1) from e
 
 
 if __name__ == "__main__":

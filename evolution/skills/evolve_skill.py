@@ -6,7 +6,6 @@ Usage:
 """
 
 import json
-import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -24,6 +23,7 @@ from evolution.core.config import (
 )
 from evolution.core.constraints import ConstraintValidator
 from evolution.core.dataset_builder import EvalDataset, GoldenDatasetLoader, SyntheticDatasetBuilder
+from evolution.core.errors import EvolutionError
 from evolution.core.external_importers import build_dataset_from_external
 from evolution.core.fitness import (
     LLMJudge,
@@ -70,10 +70,9 @@ def evolve(
 
     skill_path = find_skill(skill_name, config.hermes_agent_path)
     if not skill_path:
-        console.print(
-            f"[red]✗ Skill '{skill_name}' not found in {config.hermes_agent_path / 'skills'}[/red]"
+        raise EvolutionError(
+            f"Skill '{skill_name}' not found in {config.hermes_agent_path / 'skills'}"
         )
-        sys.exit(1)
 
     skill = load_skill(skill_path)
     console.print(f"  Loaded: {skill_path.relative_to(config.hermes_agent_path)}")
@@ -113,8 +112,7 @@ def evolve(
             model=eval_model,
         )
         if not dataset.all_examples:
-            console.print("[red]✗ No relevant examples found from session history[/red]")
-            sys.exit(1)
+            raise EvolutionError("No relevant examples found from session history")
         console.print(f"  Mined {len(dataset.all_examples)} examples from session history")
     elif eval_source == "synthetic":
         builder = SyntheticDatasetBuilder(config)
@@ -131,8 +129,7 @@ def evolve(
         dataset = EvalDataset.load(Path(dataset_path))
         console.print(f"  Loaded dataset: {len(dataset.all_examples)} examples")
     else:
-        console.print("[red]✗ Specify --dataset-path or use --eval-source synthetic[/red]")
-        sys.exit(1)
+        raise EvolutionError("Specify --dataset-path or use --eval-source synthetic")
 
     console.print(
         f"  Split: {len(dataset.train)} train / {len(dataset.val)} val / {len(dataset.holdout)} holdout"
@@ -258,8 +255,15 @@ def evolve(
         return
 
     if config.run_pytest:
-        console.print("\n[bold]Running hermes-agent pytest gate[/bold]")
-        test_result = validator.run_test_suite(hermes_agent_path)
+        console.print(
+            "\n[bold]Running hermes-agent pytest gate "
+            "(evolved skill applied in temp workspace)[/bold]"
+        )
+        test_result = validator.run_test_suite(
+            hermes_agent_path,
+            artifact_relpath=skill_path.relative_to(config.hermes_agent_path),
+            artifact_text=evolved_full,
+        )
         icon = "✓" if test_result.passed else "✗"
         color = "green" if test_result.passed else "red"
         console.print(
@@ -413,17 +417,21 @@ def main(
     dry_run,
 ):
     """Evolve a Hermes Agent skill using DSPy + GEPA optimization."""
-    evolve(
-        skill_name=skill,
-        iterations=iterations,
-        eval_source=eval_source,
-        dataset_path=dataset_path,
-        optimizer_model=optimizer_model,
-        eval_model=eval_model,
-        hermes_repo=hermes_repo,
-        run_tests=run_tests,
-        dry_run=dry_run,
-    )
+    try:
+        evolve(
+            skill_name=skill,
+            iterations=iterations,
+            eval_source=eval_source,
+            dataset_path=dataset_path,
+            optimizer_model=optimizer_model,
+            eval_model=eval_model,
+            hermes_repo=hermes_repo,
+            run_tests=run_tests,
+            dry_run=dry_run,
+        )
+    except EvolutionError as e:
+        console.print(f"[red]✗ {e}[/red]")
+        raise SystemExit(1) from e
 
 
 if __name__ == "__main__":
