@@ -9,3 +9,7 @@ CLI wrappers catch it and translate to a non-zero exit code.
 
 class EvolutionError(RuntimeError):
     """Raised when an evolution run cannot proceed or must abort safely."""
+
+
+class BudgetExceededError(EvolutionError):
+    """Raised when estimated API spend exceeds the configured hard budget."""

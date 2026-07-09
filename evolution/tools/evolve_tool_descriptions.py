@@ -753,6 +753,7 @@ def finalize_tool_description_run(
         "improvement": improvement,
         "constraint_violations": violations,
         "deployable": deployable,
+        "output_dir": str(output_dir),
         "elapsed_seconds": elapsed,
         "train_examples": train_examples,
         "holdout_examples": holdout_examples,

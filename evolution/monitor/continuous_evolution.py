@@ -499,25 +499,23 @@ class ContinuousEvolution:
             self.checkpoint_file.unlink()
 
     @staticmethod
-    def _read_latest_run_metrics(output_dir: Path, result: dict) -> None:
-        """Fill ``result`` from the newest run's metrics.json under ``output_dir``.
+    def _consume_run_metrics(metrics: dict | None, result: dict) -> None:
+        """Fill ``result`` from the metrics dict returned by a Phase 1/2/3 run.
 
-        A run only counts as success when it improved AND passed its constraint
-        gates (``deployable``, written by Phase 2/3; defaults to True for
-        metrics that predate the flag).
+        Consuming the run's own return value (instead of scavenging the newest
+        output directory by mtime) guarantees the result is attributed to this
+        run, never to a stale or concurrent one. A run only counts as success
+        when it improved AND passed its constraint gates (``deployable``;
+        defaults to True for metrics that predate the flag).
         """
-        if not output_dir.exists():
+        if not metrics:
+            result["error"] = result["error"] or "evolution run returned no metrics"
             return
-        subdirs = sorted(output_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
-        if not subdirs:
-            return
-        metrics_file = subdirs[0] / "metrics.json"
-        if not metrics_file.exists():
-            return
-        metrics = json.loads(metrics_file.read_text())
         result["improvement"] = metrics.get("improvement", 0.0)
-        result["output_dir"] = str(subdirs[0])
-        result["success"] = metrics.get("improvement", 0.0) > 0 and metrics.get("deployable", True)
+        result["output_dir"] = str(metrics.get("output_dir", ""))
+        result["success"] = result["improvement"] > 0 and metrics.get("deployable", True)
+        if metrics.get("error"):
+            result["error"] = str(metrics["error"])
 
     def _optimize_target(self, target) -> dict:
         """Dispatch optimization to the appropriate Phase 1/2/3 function.
@@ -535,7 +533,7 @@ class ContinuousEvolution:
                     target.target_name,
                     self.optimize_iterations,
                 )
-                evolve(
+                run_metrics = evolve(
                     skill_name=target.target_name,
                     iterations=self.optimize_iterations,
                     eval_source="synthetic",
@@ -544,8 +542,7 @@ class ContinuousEvolution:
                     hermes_repo=str(self.hermes_agent_path),
                     run_tests=True,
                 )
-                # Check output directory for the latest run
-                self._read_latest_run_metrics(Path("output") / target.target_name, result)
+                self._consume_run_metrics(run_metrics, result)
                 logger.info(
                     "Skill %s: improvement=%+.3f success=%s",
                     target.target_name,
@@ -565,14 +562,14 @@ class ContinuousEvolution:
                     target.target_name,
                     self.optimize_iterations,
                 )
-                evolve_tool_descriptions(
+                run_metrics = evolve_tool_descriptions(
                     iterations=self.optimize_iterations,
                     optimizer_model=self.optimizer_model,
                     eval_model=self.optimizer_model,
                     hermes_repo=str(self.hermes_agent_path),
                     tool_filter=[target.target_name],
                 )
-                self._read_latest_run_metrics(Path("output/tool_descriptions"), result)
+                self._consume_run_metrics(run_metrics, result)
                 logger.info(
                     "Tool %s: improvement=%+.3f success=%s",
                     target.target_name,
@@ -592,14 +589,14 @@ class ContinuousEvolution:
                     target.target_name,
                     self.optimize_iterations,
                 )
-                evolve_prompt_section(
+                run_metrics = evolve_prompt_section(
                     section_name=target.target_name,
                     iterations=self.optimize_iterations,
                     optimizer_model=self.optimizer_model,
                     eval_model=self.optimizer_model,
                     hermes_repo=str(self.hermes_agent_path),
                 )
-                self._read_latest_run_metrics(Path("output/prompt_sections"), result)
+                self._consume_run_metrics(run_metrics, result)
                 logger.info(
                     "Prompt section %s: improvement=%+.3f success=%s",
                     target.target_name,

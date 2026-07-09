@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+from evolution.core.redaction import redact_secrets
+
 
 @dataclass
 class PRChange:
@@ -47,13 +49,20 @@ class PRMetrics:
 
 @dataclass
 class PRResult:
-    """Result of creating a PR."""
+    """Result of creating a PR.
+
+    ``success`` is True only when the PR itself was created. A pushed branch
+    without a PR is reported as ``success=False, branch_pushed=True`` so
+    callers can never mistake a branch push for a created PR.
+    """
 
     success: bool
     branch_name: str
     pr_url: str | None = None
     error: str | None = None
     diff_summary: str = ""
+    branch_pushed: bool = False
+    pr_created: bool = False
 
 
 class PRBuilder:
@@ -137,11 +146,12 @@ class PRBuilder:
             target_path.write_text(change.evolved_content, encoding="utf-8")
             files_changed.append(change.file_path)
 
-        # Generate diff summary
-        diff_summary = self._generate_diff_summary(changes)
+        # Generate diff summary. Redact secret-looking content: the PR body is
+        # published to GitHub, so evolved text must never leak keys/tokens.
+        diff_summary = redact_secrets(self._generate_diff_summary(changes))
 
         # Commit
-        commit_msg = self._build_commit_message(changes, metrics)
+        commit_msg = redact_secrets(self._build_commit_message(changes, metrics))
         try:
             self._run_git(["add"] + files_changed, cwd=self.hermes_agent_path)
             self._run_git(["commit", "-m", commit_msg], cwd=self.hermes_agent_path)
@@ -167,7 +177,7 @@ class PRBuilder:
             )
 
         # Create PR via gh CLI
-        pr_body = self._build_pr_body(changes, metrics, diff_summary)
+        pr_body = redact_secrets(self._build_pr_body(changes, metrics, diff_summary))
         pr_title = f"{title_prefix}: {' & '.join(change_names)} (score {metrics.baseline_score:.3f} → {metrics.evolved_score:.3f})"
 
         try:
@@ -177,27 +187,38 @@ class PRBuilder:
                 capture_output=True,
                 text=True,
             )
-            if pr_output.returncode == 0:
-                pr_url = pr_output.stdout.strip()
-            else:
-                # gh CLI failed — branch is still created, log the error
-                import logging
-
-                logging.getLogger(__name__).warning(
-                    "gh pr create failed: %s", pr_output.stderr.strip()
-                )
-                pr_url = None
         except FileNotFoundError:
-            # gh CLI not installed — branch is still created
-            pr_url = None
-        except subprocess.CalledProcessError:
-            pr_url = None
+            # gh CLI not installed — the branch is pushed but there is no PR.
+            return PRResult(
+                success=False,
+                branch_name=branch_name,
+                error="Branch pushed but no PR created: gh CLI not found. Create the PR manually.",
+                diff_summary=diff_summary,
+                branch_pushed=True,
+                pr_created=False,
+            )
+
+        if pr_output.returncode != 0:
+            import logging
+
+            stderr = (pr_output.stderr or "").strip()
+            logging.getLogger(__name__).warning("gh pr create failed: %s", stderr)
+            return PRResult(
+                success=False,
+                branch_name=branch_name,
+                error=f"Branch pushed but gh pr create failed: {stderr}",
+                diff_summary=diff_summary,
+                branch_pushed=True,
+                pr_created=False,
+            )
 
         return PRResult(
             success=True,
             branch_name=branch_name,
-            pr_url=pr_url,
+            pr_url=pr_output.stdout.strip(),
             diff_summary=diff_summary,
+            branch_pushed=True,
+            pr_created=True,
         )
 
     def _generate_diff_summary(self, changes: list[PRChange]) -> str:

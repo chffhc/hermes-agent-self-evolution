@@ -87,3 +87,122 @@ def test_safe_branch_name_strips_shell_metacharacters():
     assert " " not in branch
     assert "$" not in branch
     assert ".." not in branch
+
+
+def _init_repo_with_origin(tmp_path: Path) -> Path:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_repo(repo)
+    origin = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", str(origin)], check=True, capture_output=True)
+    subprocess.run(["git", "remote", "add", "origin", str(origin)], cwd=repo, check=True)
+    return repo
+
+
+def _intercept_gh(monkeypatch, gh_result):
+    """Route `gh` invocations to a stub while running real git commands."""
+    real_run = subprocess.run
+
+    def fake_run(cmd, *args, **kwargs):
+        if cmd and cmd[0] == "gh":
+            if isinstance(gh_result, Exception):
+                raise gh_result
+            return gh_result
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+
+def _change() -> list[PRChange]:
+    return [
+        PRChange(
+            file_path="README.md",
+            original_content="baseline\n",
+            evolved_content="changed\n",
+            change_type="code",
+        )
+    ]
+
+
+def test_pr_create_failure_is_not_reported_as_success(tmp_path, monkeypatch):
+    repo = _init_repo_with_origin(tmp_path)
+    _intercept_gh(
+        monkeypatch,
+        subprocess.CompletedProcess(["gh"], 1, stdout="", stderr="gh: not authenticated"),
+    )
+
+    result = PRBuilder(repo).create_pr(_change(), _metrics())
+
+    assert not result.success
+    assert result.branch_pushed
+    assert not result.pr_created
+    assert result.pr_url is None
+    assert "gh pr create failed" in (result.error or "")
+
+
+def test_missing_gh_cli_is_not_reported_as_success(tmp_path, monkeypatch):
+    repo = _init_repo_with_origin(tmp_path)
+    _intercept_gh(monkeypatch, FileNotFoundError("gh"))
+
+    result = PRBuilder(repo).create_pr(_change(), _metrics())
+
+    assert not result.success
+    assert result.branch_pushed
+    assert not result.pr_created
+    assert "gh CLI not found" in (result.error or "")
+
+
+def test_pr_body_and_diff_redact_secret_content(tmp_path, monkeypatch):
+    repo = _init_repo_with_origin(tmp_path)
+    captured = {}
+    real_run = subprocess.run
+
+    def fake_run(cmd, *args, **kwargs):
+        if cmd and cmd[0] == "gh":
+            captured["cmd"] = cmd
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout="https://github.com/example/repo/pull/1\n", stderr=""
+            )
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    secret = "sk-ant-api03-supersecretvalue1234567890"
+    result = PRBuilder(repo).create_pr(
+        [
+            PRChange(
+                file_path="README.md",
+                original_content="baseline\n",
+                evolved_content=f"changed with {secret}\n",
+                change_type="code",
+            )
+        ],
+        _metrics(),
+    )
+
+    assert result.success
+    pr_body = captured["cmd"][captured["cmd"].index("--body") + 1]
+    assert secret not in pr_body
+    assert "[REDACTED]" in pr_body
+    assert secret not in result.diff_summary
+    commit_msg = subprocess.run(
+        ["git", "log", "-1", "--format=%B"], cwd=repo, check=True, capture_output=True, text=True
+    ).stdout
+    assert secret not in commit_msg
+
+
+def test_pr_create_success_reports_pr_created(tmp_path, monkeypatch):
+    repo = _init_repo_with_origin(tmp_path)
+    _intercept_gh(
+        monkeypatch,
+        subprocess.CompletedProcess(
+            ["gh"], 0, stdout="https://github.com/example/repo/pull/1\n", stderr=""
+        ),
+    )
+
+    result = PRBuilder(repo).create_pr(_change(), _metrics())
+
+    assert result.success
+    assert result.branch_pushed
+    assert result.pr_created
+    assert result.pr_url == "https://github.com/example/repo/pull/1"

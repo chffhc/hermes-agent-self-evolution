@@ -62,43 +62,111 @@ def test_monitor_state_defaults_to_ignored_output_directory(tmp_path: Path, monk
     assert monitor.metrics_file == Path("output/monitor/metrics_store.json")
 
 
-def _write_run_metrics(output_dir: Path, **metrics) -> Path:
-    run_dir = output_dir / "20260709_000000"
-    run_dir.mkdir(parents=True)
-    (run_dir / "metrics.json").write_text(json.dumps(metrics))
-    return run_dir
-
-
 def _empty_result() -> dict:
     return {"success": False, "improvement": 0.0, "output_dir": "", "error": None}
 
 
-def test_constraint_violating_run_is_not_counted_as_success(tmp_path: Path):
-    _write_run_metrics(tmp_path / "out", improvement=0.5, deployable=False)
+def test_constraint_violating_run_is_not_counted_as_success():
     result = _empty_result()
 
-    ContinuousEvolution._read_latest_run_metrics(tmp_path / "out", result)
+    ContinuousEvolution._consume_run_metrics({"improvement": 0.5, "deployable": False}, result)
 
     assert result["improvement"] == 0.5
     assert not result["success"]
 
 
-def test_deployable_improving_run_counts_as_success(tmp_path: Path):
-    _write_run_metrics(tmp_path / "out", improvement=0.5, deployable=True)
+def test_deployable_improving_run_counts_as_success():
     result = _empty_result()
 
-    ContinuousEvolution._read_latest_run_metrics(tmp_path / "out", result)
+    ContinuousEvolution._consume_run_metrics(
+        {"improvement": 0.5, "deployable": True, "output_dir": "output/demo/1"}, result
+    )
+
+    assert result["success"]
+    assert result["output_dir"] == "output/demo/1"
+
+
+def test_legacy_metrics_without_deployable_flag_still_count():
+    result = _empty_result()
+
+    ContinuousEvolution._consume_run_metrics({"improvement": 0.5}, result)
 
     assert result["success"]
 
 
-def test_legacy_metrics_without_deployable_flag_still_count(tmp_path: Path):
-    _write_run_metrics(tmp_path / "out", improvement=0.5)
+def test_run_without_metrics_is_not_counted_as_success():
     result = _empty_result()
 
-    ContinuousEvolution._read_latest_run_metrics(tmp_path / "out", result)
+    ContinuousEvolution._consume_run_metrics(None, result)
+
+    assert not result["success"]
+    assert "no metrics" in result["error"]
+
+
+def test_failed_run_error_is_surfaced():
+    result = _empty_result()
+
+    ContinuousEvolution._consume_run_metrics(
+        {"improvement": 0.0, "deployable": False, "error": "pytest gate failed"}, result
+    )
+
+    assert not result["success"]
+    assert result["error"] == "pytest gate failed"
+
+
+def test_optimize_target_ignores_stale_output_directories(tmp_path: Path, monkeypatch):
+    """A stale metrics.json from a previous/concurrent run must not be
+    attributed to a run that returned no metrics of its own."""
+    monkeypatch.chdir(tmp_path)
+    stale_run = tmp_path / "output" / "demo" / "20260101_000000"
+    stale_run.mkdir(parents=True)
+    (stale_run / "metrics.json").write_text(json.dumps({"improvement": 0.9, "deployable": True}))
+
+    engine = ContinuousEvolution(hermes_agent_path=tmp_path, benchmark_gate=False, resume=False)
+
+    import evolution.skills.evolve_skill as evolve_skill_mod
+
+    monkeypatch.setattr(evolve_skill_mod, "evolve", lambda **kwargs: None)
+
+    result = engine._optimize_target(_skill_target("demo"))
+
+    assert not result["success"]
+    assert result["output_dir"] == ""
+
+
+def test_optimize_target_consumes_returned_metrics(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    engine = ContinuousEvolution(hermes_agent_path=tmp_path, benchmark_gate=False, resume=False)
+
+    import evolution.skills.evolve_skill as evolve_skill_mod
+
+    monkeypatch.setattr(
+        evolve_skill_mod,
+        "evolve",
+        lambda **kwargs: {
+            "improvement": 0.2,
+            "deployable": True,
+            "output_dir": "output/demo/20260709_120000",
+        },
+    )
+
+    result = engine._optimize_target(_skill_target("demo"))
 
     assert result["success"]
+    assert result["improvement"] == 0.2
+    assert result["output_dir"] == "output/demo/20260709_120000"
+
+
+def _skill_target(name: str) -> OptimizationTarget:
+    return OptimizationTarget(
+        target_type="skill",
+        target_name=name,
+        current_score=0.2,
+        estimated_improvement=0.5,
+        usage_frequency=10,
+        priority_score=5.0,
+        reason="test",
+    )
 
 
 def test_optimize_target_survives_per_target_evolution_error(tmp_path: Path, monkeypatch):

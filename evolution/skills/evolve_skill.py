@@ -50,8 +50,15 @@ def evolve(
     hermes_repo: str | None = None,
     run_tests: bool = False,
     dry_run: bool = False,
-):
-    """Main evolution function — orchestrates the full optimization loop."""
+) -> dict | None:
+    """Main evolution function — orchestrates the full optimization loop.
+
+    Returns the run's metrics dict (including ``improvement``, ``deployable``
+    and ``output_dir``) so programmatic callers such as Phase 5 can consume
+    results directly instead of scavenging output directories. Failed runs
+    return a metrics dict with ``deployable: False`` and an ``error``;
+    ``dry_run`` returns None.
+    """
 
     hermes_agent_path = resolve_hermes_agent_path(hermes_repo)
     config = EvolutionConfig(
@@ -231,7 +238,7 @@ def evolve(
         output_path.write_text(str(e), encoding="utf-8")
         console.print(f"[red]✗ Could not extract evolved skill text: {e}[/red]")
         console.print(f"  Saved extraction error to {output_path}")
-        return
+        return _failed_run_metrics(skill_name, str(output_path.parent), f"extraction failed: {e}")
     evolved_full = reassemble_skill(skill["frontmatter"], evolved_body)
 
     # ── 7. Validate evolved skill ───────────────────────────────────────
@@ -252,7 +259,9 @@ def evolve(
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(evolved_full)
         console.print(f"  Saved failed variant to {output_path}")
-        return
+        return _failed_run_metrics(
+            skill_name, str(output_path.parent), "evolved skill failed constraint gates"
+        )
 
     if config.run_pytest:
         console.print(
@@ -277,7 +286,9 @@ def evolve(
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_text(evolved_full, encoding="utf-8")
             console.print(f"  Saved failed variant to {output_path}")
-            return
+            return _failed_run_metrics(
+                skill_name, str(output_path.parent), "evolved skill failed pytest gate"
+            )
 
     # ── 8. Evaluate on holdout set ──────────────────────────────────────
     console.print(f"\n[bold]Evaluating on holdout set ({len(dataset.holdout)} examples)[/bold]")
@@ -371,6 +382,8 @@ def evolve(
         "holdout_examples": len(dataset.holdout),
         "elapsed_seconds": elapsed,
         "constraints_passed": all_pass,
+        "deployable": all_pass,
+        "output_dir": str(output_dir),
     }
     (output_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
 
@@ -388,6 +401,19 @@ def evolve(
             f"\n[yellow]⚠ Evolution did not improve skill (change: {improvement:+.3f})[/yellow]"
         )
         console.print("  Try: more iterations, better eval dataset, or different optimizer model")
+
+    return metrics
+
+
+def _failed_run_metrics(skill_name: str, output_dir: str, error: str) -> dict:
+    """Metrics for a run that failed a gate — never deployable, no improvement."""
+    return {
+        "skill_name": skill_name,
+        "improvement": 0.0,
+        "deployable": False,
+        "output_dir": output_dir,
+        "error": error,
+    }
 
 
 @click.command()

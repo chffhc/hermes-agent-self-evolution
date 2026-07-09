@@ -78,12 +78,16 @@ def get_api_base() -> str:
 def _record_lm_usage(lm: Any) -> None:
     """Record any new DSPy LM history entries since the last tracked call."""
     from evolution.core.cost_tracker import tracker
+    from evolution.core.errors import BudgetExceededError
 
     try:
         history = getattr(lm, "history", []) or []
         last_recorded = getattr(lm, "_usage_tracking_last_history_len", 0)
         raw_model = getattr(lm, "_usage_tracking_raw_model", "unknown")
-        for entry in history[last_recorded:]:
+        for offset, entry in enumerate(history[last_recorded:]):
+            # Mark the entry consumed before record(): a budget abort mid-loop
+            # must not double-count already-recorded entries on a later call.
+            lm._usage_tracking_last_history_len = last_recorded + offset + 1
             usage = entry.get("usage", {}) if isinstance(entry, dict) else {}
             if not isinstance(usage, dict):
                 continue
@@ -91,6 +95,8 @@ def _record_lm_usage(lm: Any) -> None:
             out = usage.get("completion_tokens", 0) or usage.get("output_tokens", 0) or 0
             tracker.record(raw_model, int(inp), int(out))
         lm._usage_tracking_last_history_len = len(history)
+    except BudgetExceededError:
+        raise  # Hard budget must fail closed, not be swallowed.
     except Exception:
         pass  # Usage tracking must never break inference.
 

@@ -793,6 +793,7 @@ def finalize_prompt_section_run(
         "improvement": improvement,
         "constraint_violations": violations,
         "deployable": deployable,
+        "output_dir": str(output_dir),
         "elapsed_seconds": elapsed,
     }
     (output_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))

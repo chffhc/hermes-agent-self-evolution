@@ -329,11 +329,13 @@ class TestCostTracker:
         assert "qwen3.6-plus" in s.per_model
         assert "judge" in s.per_purpose
 
-    def test_unknown_model_zero_cost(self):
+    def test_unknown_model_conservative_nonzero_cost(self):
         from evolution.core.cost_tracker import _estimate_cost
 
+        # Unknown models are charged at a conservative default so budget
+        # enforcement cannot be bypassed by an unpriced model name.
         cost = _estimate_cost("unknown-model-xyz", 1000, 500)
-        assert cost == 0.0
+        assert cost > 0.0
 
     def test_known_model_has_cost(self):
         from evolution.core.cost_tracker import _estimate_cost
