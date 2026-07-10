@@ -191,6 +191,38 @@ def test_pr_body_and_diff_redact_secret_content(tmp_path, monkeypatch):
     assert secret not in commit_msg
 
 
+def test_pr_body_frames_scores_as_local_proxy_eval(tmp_path, monkeypatch):
+    repo = _init_repo_with_origin(tmp_path)
+    captured = {}
+    real_run = subprocess.run
+
+    def fake_run(cmd, *args, **kwargs):
+        if cmd and cmd[0] == "gh":
+            captured["cmd"] = cmd
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout="https://github.com/example/repo/pull/1\n", stderr=""
+            )
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = PRBuilder(repo).create_pr(_change(), _metrics())
+
+    assert result.success
+    pr_title = captured["cmd"][captured["cmd"].index("--title") + 1]
+    pr_body = captured["cmd"][captured["cmd"].index("--body") + 1]
+    # A tiny local eval must never be presented as a validated improvement.
+    assert "proxy score" in pr_title
+    assert "local proxy evaluation" in pr_body
+    assert "not a production benchmark" in pr_body
+    assert "human review" in pr_body
+    assert "validated improvement" not in pr_body.replace("not a validated improvement", "")
+    commit_msg = subprocess.run(
+        ["git", "log", "-1", "--format=%B"], cwd=repo, check=True, capture_output=True, text=True
+    ).stdout
+    assert "local proxy eval score" in commit_msg
+
+
 def test_pr_create_success_reports_pr_created(tmp_path, monkeypatch):
     repo = _init_repo_with_origin(tmp_path)
     _intercept_gh(

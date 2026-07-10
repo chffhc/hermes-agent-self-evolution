@@ -22,6 +22,7 @@ from evolution.core.config import (
     resolve_hermes_agent_path,
 )
 from evolution.core.constraints import ConstraintValidator
+from evolution.core.cost_tracker import set_budget_from_option
 from evolution.core.dataset_builder import EvalDataset, GoldenDatasetLoader, SyntheticDatasetBuilder
 from evolution.core.errors import EvolutionError
 from evolution.core.external_importers import build_dataset_from_external
@@ -50,8 +51,12 @@ def evolve(
     hermes_repo: str | None = None,
     run_tests: bool = False,
     dry_run: bool = False,
+    max_cost_usd: float | None = None,
 ) -> dict | None:
     """Main evolution function — orchestrates the full optimization loop.
+
+    ``max_cost_usd`` sets a hard USD budget on the global cost tracker for
+    this process; ``None`` keeps the EVOLUTION_MAX_COST_USD env default.
 
     Returns the run's metrics dict (including ``improvement``, ``deployable``
     and ``output_dir``) so programmatic callers such as Phase 5 can consume
@@ -68,7 +73,12 @@ def evolve(
         eval_model=eval_model,
         judge_model=eval_model,  # Use same model for dataset generation
         run_pytest=run_tests,
+        max_cost_usd=max_cost_usd,
     )
+
+    # Apply the budget before any billable work — dataset generation already
+    # makes LLM calls, so this must precede everything, not just the optimizer.
+    set_budget_from_option(config.max_cost_usd)
 
     # ── 1. Find and load the skill ──────────────────────────────────────
     console.print(
@@ -391,14 +401,21 @@ def evolve(
 
     if improvement > 0:
         console.print(
-            f"\n[bold green]✓ Evolution improved skill by {improvement:+.3f} ({improvement/max(0.001, avg_baseline)*100:+.1f}%)[/bold green]"
+            f"\n[bold green]✓ Holdout proxy score improved by {improvement:+.3f} "
+            f"({improvement/max(0.001, avg_baseline)*100:+.1f}%) on "
+            f"{len(holdout_examples)} held-out examples[/bold green]"
+        )
+        console.print(
+            "  Local proxy signal only — not validated production improvement; "
+            "requires human review."
         )
         console.print(
             f"  Review the diff: diff {output_dir}/baseline_skill.md {output_dir}/evolved_skill.md"
         )
     else:
         console.print(
-            f"\n[yellow]⚠ Evolution did not improve skill (change: {improvement:+.3f})[/yellow]"
+            f"\n[yellow]⚠ Evolution did not improve the holdout proxy score "
+            f"(change: {improvement:+.3f})[/yellow]"
         )
         console.print("  Try: more iterations, better eval dataset, or different optimizer model")
 
@@ -431,6 +448,13 @@ def _failed_run_metrics(skill_name: str, output_dir: str, error: str) -> dict:
 @click.option("--hermes-repo", default=None, help="Path to hermes-agent repo")
 @click.option("--run-tests", is_flag=True, help="Run full pytest suite as constraint gate")
 @click.option("--dry-run", is_flag=True, help="Validate setup without running optimization")
+@click.option(
+    "--max-cost-usd",
+    default=None,
+    type=click.FloatRange(min=0, min_open=True),
+    help="Hard USD budget for LLM API cost; the run aborts once estimated spend "
+    "exceeds it (overrides EVOLUTION_MAX_COST_USD)",
+)
 def main(
     skill,
     iterations,
@@ -441,6 +465,7 @@ def main(
     hermes_repo,
     run_tests,
     dry_run,
+    max_cost_usd,
 ):
     """Evolve a Hermes Agent skill using DSPy + GEPA optimization."""
     try:
@@ -454,6 +479,7 @@ def main(
             hermes_repo=hermes_repo,
             run_tests=run_tests,
             dry_run=dry_run,
+            max_cost_usd=max_cost_usd,
         )
     except EvolutionError as e:
         console.print(f"[red]✗ {e}[/red]")

@@ -791,9 +791,16 @@ def finalize_tool_description_run(
     console.print(table)
 
     if improvement > 0:
-        console.print(f"\n[bold green]✓ Tool selection improved by {improvement:+.1%}[/bold green]")
+        console.print(
+            f"\n[bold green]✓ Tool selection accuracy improved by {improvement:+.1%} "
+            f"on the local eval set[/bold green]"
+        )
+        console.print("  Local proxy signal only — requires human review before deployment.")
     else:
-        console.print(f"\n[yellow]⚠ No improvement in tool selection ({improvement:+.1%})[/yellow]")
+        console.print(
+            f"\n[yellow]⚠ No improvement in tool selection on the local eval set "
+            f"({improvement:+.1%})[/yellow]"
+        )
 
     return metrics
 
@@ -806,8 +813,20 @@ def finalize_tool_description_run(
 @click.option("--tool", multiple=True, help="Specific tool(s) to evolve (repeat for multiple)")
 @click.option("--dataset-path", default=None, help="Path to existing tool selection dataset")
 @click.option("--dry-run", is_flag=True, help="Validate setup without running")
-def main(iterations, optimizer_model, eval_model, hermes_repo, tool, dataset_path, dry_run):
+@click.option(
+    "--max-cost-usd",
+    default=None,
+    type=click.FloatRange(min=0, min_open=True),
+    help="Hard USD budget for LLM API cost; the run aborts once estimated spend "
+    "exceeds it (overrides EVOLUTION_MAX_COST_USD)",
+)
+def main(
+    iterations, optimizer_model, eval_model, hermes_repo, tool, dataset_path, dry_run, max_cost_usd
+):
     """Evolve tool descriptions using DSPy + GEPA optimization."""
+    from evolution.core.cost_tracker import set_budget_from_option
+
+    set_budget_from_option(max_cost_usd)
     try:
         evolve_tool_descriptions(
             iterations=iterations,

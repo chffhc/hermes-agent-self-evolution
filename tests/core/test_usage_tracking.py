@@ -93,6 +93,44 @@ def test_budget_from_env_parsing(monkeypatch):
     assert _budget_from_env() is None
 
 
+@pytest.fixture
+def global_budget_guard():
+    """Snapshot and restore the global tracker's budget around a test."""
+    from evolution.core.cost_tracker import tracker
+
+    before = tracker._max_cost_usd
+    yield tracker
+    tracker.set_budget(before)
+
+
+def test_set_budget_from_option_none_preserves_existing_budget(global_budget_guard):
+    from evolution.core.cost_tracker import set_budget_from_option
+
+    global_budget_guard.set_budget(1.23)
+    set_budget_from_option(None)
+    assert global_budget_guard._max_cost_usd == 1.23
+
+
+def test_set_budget_from_option_overrides_env_default(global_budget_guard):
+    from evolution.core.cost_tracker import set_budget_from_option
+
+    global_budget_guard.set_budget(99.0)  # stand-in for an env-derived budget
+    set_budget_from_option(0.5)
+    assert global_budget_guard._max_cost_usd == 0.5
+
+
+def test_set_budget_from_option_rejects_nonpositive(global_budget_guard):
+    from evolution.core.cost_tracker import set_budget_from_option
+
+    global_budget_guard.set_budget(2.0)
+    # An explicit bad value must fail loudly, never silently disable the budget.
+    with pytest.raises(ValueError):
+        set_budget_from_option(0)
+    with pytest.raises(ValueError):
+        set_budget_from_option(-5.0)
+    assert global_budget_guard._max_cost_usd == 2.0
+
+
 def test_budget_error_propagates_through_usage_tracking_wrapper(monkeypatch):
     from evolution.core import config as config_module
     from evolution.core.cost_tracker import APICostTracker

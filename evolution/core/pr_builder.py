@@ -178,7 +178,7 @@ class PRBuilder:
 
         # Create PR via gh CLI
         pr_body = redact_secrets(self._build_pr_body(changes, metrics, diff_summary))
-        pr_title = f"{title_prefix}: {' & '.join(change_names)} (score {metrics.baseline_score:.3f} → {metrics.evolved_score:.3f})"
+        pr_title = f"{title_prefix}: {' & '.join(change_names)} (proxy score {metrics.baseline_score:.3f} → {metrics.evolved_score:.3f})"
 
         try:
             pr_output = subprocess.run(
@@ -247,7 +247,7 @@ class PRBuilder:
         names_str = ", ".join(change_names)
 
         msg = (
-            f"evolve: {names_str} — score improved "
+            f"evolve: {names_str} — local proxy eval score "
             f"{metrics.baseline_score:.3f} → {metrics.evolved_score:.3f} "
             f"({metrics.improvement_pct:+.1f}%)\n\n"
             f"Optimizer: {metrics.optimizer} ({metrics.iterations} iterations)\n"
@@ -280,12 +280,16 @@ class PRBuilder:
         body = (
             f"## 🧬 Self-Evolution: {' & '.join(change_names)}\n\n"
             f"Automatically evolved via DSPy + GEPA optimization pipeline.\n\n"
-            f"### Score Comparison\n\n"
+            f"### Score Comparison (local proxy evaluation)\n\n"
             f"| Metric | Baseline | Evolved | Change |\n"
             f"|--------|----------|---------|--------|\n"
-            f"| **Score** | {metrics.baseline_score:.3f} | {metrics.evolved_score:.3f} | "
+            f"| **Proxy score** | {metrics.baseline_score:.3f} | {metrics.evolved_score:.3f} | "
             f"**{metrics.improvement:+.3f} ({metrics.improvement_pct:+.1f}%)** |\n"
             f"| Holdout | — | {metrics.holdout_score:.3f} | — |\n\n"
+            f"> **Note:** Scores come from a small local proxy evaluation "
+            f"(LLM-as-judge on {metrics.holdout_examples} held-out examples), not a "
+            f"production benchmark. Treat the change as a candidate signal requiring "
+            f"human review, not a validated improvement.\n\n"
             f"### Optimization Details\n\n"
             f"- **Optimizer:** {metrics.optimizer}\n"
             f"- **Iterations:** {metrics.iterations}\n"

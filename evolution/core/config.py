@@ -197,6 +197,10 @@ class EvolutionConfig:
     val_ratio: float = 0.25
     holdout_ratio: float = 0.25
 
+    # Hard USD budget for LLM API cost. None falls back to the
+    # EVOLUTION_MAX_COST_USD env default already applied to the tracker.
+    max_cost_usd: float | None = None
+
     # Benchmark gating
     run_pytest: bool = True
     run_tblite: bool = False  # Expensive — opt-in

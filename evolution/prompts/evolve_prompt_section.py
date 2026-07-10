@@ -845,8 +845,27 @@ def finalize_prompt_section_run(
 @click.option("--hermes-repo", default=None, help="Path to hermes-agent repo")
 @click.option("--dataset-path", default=None, help="Path to existing behavioral test dataset")
 @click.option("--dry-run", is_flag=True, help="Validate setup without running")
-def main(section, iterations, optimizer_model, eval_model, hermes_repo, dataset_path, dry_run):
+@click.option(
+    "--max-cost-usd",
+    default=None,
+    type=click.FloatRange(min=0, min_open=True),
+    help="Hard USD budget for LLM API cost; the run aborts once estimated spend "
+    "exceeds it (overrides EVOLUTION_MAX_COST_USD)",
+)
+def main(
+    section,
+    iterations,
+    optimizer_model,
+    eval_model,
+    hermes_repo,
+    dataset_path,
+    dry_run,
+    max_cost_usd,
+):
     """Evolve system prompt sections using DSPy + GEPA optimization."""
+    from evolution.core.cost_tracker import set_budget_from_option
+
+    set_budget_from_option(max_cost_usd)
     try:
         evolve_prompt_section(
             section_name=section,

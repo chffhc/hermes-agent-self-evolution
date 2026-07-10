@@ -35,7 +35,14 @@ os.environ["PYTHONUNBUFFERED"] = "1"  # noqa: E402
     default="qwen3.6-plus",
     help="Model for LLM-as-judge evaluation (default: qwen3.6-plus)",
 )
-def main(skill, iterations, eval_source, dataset_path, optimizer_model, eval_model):
+@click.option(
+    "--max-cost-usd",
+    default=None,
+    type=click.FloatRange(min=0, min_open=True),
+    help="Hard USD budget for LLM API cost; the run aborts once estimated spend "
+    "exceeds it (overrides EVOLUTION_MAX_COST_USD)",
+)
+def main(skill, iterations, eval_source, dataset_path, optimizer_model, eval_model, max_cost_usd):
     """Run skill evolution with configurable parameters."""
     print("=== Starting Evolution ===", flush=True)
     print(f"Skill: {skill}", flush=True)
@@ -43,6 +50,8 @@ def main(skill, iterations, eval_source, dataset_path, optimizer_model, eval_mod
     print(f"Eval source: {eval_source}", flush=True)
     print(f"Optimizer model: {optimizer_model}", flush=True)
     print(f"Eval model: {eval_model}", flush=True)
+    if max_cost_usd is not None:
+        print(f"Max cost: ${max_cost_usd:.2f}", flush=True)
 
     kwargs = {
         "skill_name": skill,
@@ -50,6 +59,7 @@ def main(skill, iterations, eval_source, dataset_path, optimizer_model, eval_mod
         "eval_source": eval_source,
         "optimizer_model": optimizer_model,
         "eval_model": eval_model,
+        "max_cost_usd": max_cost_usd,
     }
     if dataset_path:
         kwargs["dataset_path"] = dataset_path

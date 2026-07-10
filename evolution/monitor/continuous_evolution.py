@@ -819,8 +819,23 @@ def main():
     parser.add_argument("--model", default="qwen3.6-plus", help="Optimizer model")
     parser.add_argument("--max-targets", default=3, type=int, help="Max targets per cycle")
     parser.add_argument("--no-resume", action="store_true", help="Skip checkpoint resume")
+    parser.add_argument(
+        "--max-cost-usd",
+        default=None,
+        type=float,
+        help="Hard USD budget for LLM API cost across the whole cycle; the cycle "
+        "aborts once estimated spend exceeds it (overrides EVOLUTION_MAX_COST_USD)",
+    )
 
     args = parser.parse_args()
+
+    if args.max_cost_usd is not None:
+        from evolution.core.cost_tracker import set_budget_from_option
+
+        try:
+            set_budget_from_option(args.max_cost_usd)
+        except ValueError as e:
+            parser.error(str(e))
 
     if args.setup_cron:
         setup_cron_jobs()

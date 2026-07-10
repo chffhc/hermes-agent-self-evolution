@@ -224,3 +224,19 @@ def _budget_from_env() -> float | None:
 
 # Global singleton for easy import
 tracker = APICostTracker(max_cost_usd=_budget_from_env())
+
+
+def set_budget_from_option(max_cost_usd: float | None) -> None:
+    """Apply an explicit budget from a CLI flag or config field.
+
+    ``None`` means "not specified" and leaves the current budget untouched,
+    so the EVOLUTION_MAX_COST_USD default keeps working when the option is
+    omitted. Unlike the env parser (which treats garbage as "no budget"),
+    an explicit non-positive value is rejected loudly — a typed-out budget
+    must never silently disable enforcement.
+    """
+    if max_cost_usd is None:
+        return
+    if max_cost_usd <= 0:
+        raise ValueError(f"max_cost_usd must be > 0, got {max_cost_usd}")
+    tracker.set_budget(max_cost_usd)
