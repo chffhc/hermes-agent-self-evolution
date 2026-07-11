@@ -32,6 +32,7 @@ from rich.console import Console
 
 from evolution.core.benchmark_gate import BenchmarkGate
 from evolution.core.config import get_hermes_agent_path
+from evolution.core.errors import BudgetExceededError
 
 console = Console()
 
@@ -549,6 +550,8 @@ class ContinuousEvolution:
                     result["improvement"],
                     result["success"],
                 )
+            except BudgetExceededError:
+                raise  # Hard budget aborts the whole cycle, not just this target.
             except Exception as e:
                 logger.error("Skill optimization failed for %s: %s", target.target_name, e)
                 result["error"] = str(e)
@@ -576,6 +579,8 @@ class ContinuousEvolution:
                     result["improvement"],
                     result["success"],
                 )
+            except BudgetExceededError:
+                raise  # Hard budget aborts the whole cycle, not just this target.
             except Exception as e:
                 logger.error("Tool optimization failed for %s: %s", target.target_name, e)
                 result["error"] = str(e)
@@ -603,6 +608,8 @@ class ContinuousEvolution:
                     result["improvement"],
                     result["success"],
                 )
+            except BudgetExceededError:
+                raise  # Hard budget aborts the whole cycle, not just this target.
             except Exception as e:
                 logger.error("Prompt optimization failed for %s: %s", target.target_name, e)
                 result["error"] = str(e)
@@ -629,6 +636,7 @@ class ContinuousEvolution:
             "targets_optimized": 0,
             "prs_created": 0,
             "benchmarks_passed": True,
+            "budget_exceeded": False,
             "elapsed_seconds": 0,
             "optimizations": [],
         }
@@ -637,6 +645,9 @@ class ContinuousEvolution:
         checkpoint = self._load_checkpoint() if self.resume else None
         if checkpoint:
             summary = checkpoint["summary"]
+            # A resumed cycle gets a fresh budget verdict (the checkpoint may
+            # record a past abort; this run may have a raised budget).
+            summary["budget_exceeded"] = False
             logger.info("Resumed: %d targets already optimized", summary["targets_optimized"])
 
         # ── Step 1: Scan metrics ────────────────────────────────────────
@@ -729,7 +740,17 @@ class ContinuousEvolution:
                 target.target_name,
             )
 
-            result = self._optimize_target(target)
+            try:
+                result = self._optimize_target(target)
+            except BudgetExceededError as e:
+                # Hard budget: stop the whole cycle now. Checkpoint at this
+                # target (no result recorded) so a resume with a raised budget
+                # re-runs it instead of treating it as done.
+                logger.error("Hard budget exceeded — aborting cycle: %s", e)
+                summary["budget_exceeded"] = True
+                self._save_checkpoint(summary, i, targets)
+                summary["elapsed_seconds"] = time.time() - start
+                return summary
             target_results.append(result)
             summary["optimizations"].append(
                 {

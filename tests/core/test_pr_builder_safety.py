@@ -186,8 +186,13 @@ def test_pr_body_and_diff_redact_secret_content(tmp_path, monkeypatch):
     assert "[REDACTED]" in pr_body
     assert secret not in result.diff_summary
     commit_msg = subprocess.run(
-        ["git", "log", "-1", "--format=%B"], cwd=repo, check=True, capture_output=True, text=True
+        ["git", "log", "-1", "--format=%B", result.branch_name],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
     ).stdout
+    assert "evolve" in commit_msg  # read the evolved branch, not the restored main
     assert secret not in commit_msg
 
 
@@ -218,9 +223,90 @@ def test_pr_body_frames_scores_as_local_proxy_eval(tmp_path, monkeypatch):
     assert "human review" in pr_body
     assert "validated improvement" not in pr_body.replace("not a validated improvement", "")
     commit_msg = subprocess.run(
-        ["git", "log", "-1", "--format=%B"], cwd=repo, check=True, capture_output=True, text=True
+        ["git", "log", "-1", "--format=%B", result.branch_name],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
     ).stdout
     assert "local proxy eval score" in commit_msg
+
+
+def _current_branch(repo: Path) -> str:
+    return subprocess.run(
+        ["git", "branch", "--show-current"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def test_worktree_restored_and_second_pr_does_not_stack_commits(tmp_path, monkeypatch):
+    """After create_pr the checkout must be back on the original branch, so a
+    later run branches from it instead of stacking the previous evolved commit."""
+    repo = _init_repo_with_origin(tmp_path)
+    _intercept_gh(
+        monkeypatch,
+        subprocess.CompletedProcess(
+            ["gh"], 0, stdout="https://github.com/example/repo/pull/1\n", stderr=""
+        ),
+    )
+    builder = PRBuilder(repo)
+
+    first = builder.create_pr(_change(), _metrics())
+    assert first.success
+    assert _current_branch(repo) == "main"
+
+    second = builder.create_pr(
+        [
+            PRChange(
+                file_path="docs/notes.md",
+                original_content="",
+                evolved_content="evolved notes\n",
+                change_type="code",
+            )
+        ],
+        _metrics(),
+    )
+    assert second.success
+    assert _current_branch(repo) == "main"
+
+    # The second branch must contain exactly its own commit, not the first's.
+    count = subprocess.run(
+        ["git", "rev-list", "--count", f"main..{second.branch_name}"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert count == "1"
+
+
+def test_worktree_restored_after_push_failure(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_repo(repo)  # no origin remote — push will fail
+
+    result = PRBuilder(repo).create_pr(_change(), _metrics())
+
+    assert not result.success
+    assert "Failed to push" in (result.error or "")
+    assert _current_branch(repo) == "main"
+
+
+def test_worktree_restored_after_gh_failure(tmp_path, monkeypatch):
+    repo = _init_repo_with_origin(tmp_path)
+    _intercept_gh(
+        monkeypatch,
+        subprocess.CompletedProcess(["gh"], 1, stdout="", stderr="gh: not authenticated"),
+    )
+
+    result = PRBuilder(repo).create_pr(_change(), _metrics())
+
+    assert not result.success
+    assert result.branch_pushed
+    assert _current_branch(repo) == "main"
 
 
 def test_pr_create_success_reports_pr_created(tmp_path, monkeypatch):

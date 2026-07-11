@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from evolution.core.errors import EvolutionError
+import pytest
+
+from evolution.core.errors import BudgetExceededError, EvolutionError
 from evolution.monitor.continuous_evolution import (
     AutoTriage,
     BenchmarkTrend,
@@ -167,6 +169,59 @@ def _skill_target(name: str) -> OptimizationTarget:
         priority_score=5.0,
         reason="test",
     )
+
+
+def test_optimize_target_propagates_budget_exceeded(tmp_path: Path, monkeypatch):
+    """A hard budget abort must escape the per-target error handling —
+    swallowing it would let the cycle keep spending on remaining targets."""
+    monkeypatch.chdir(tmp_path)
+    engine = ContinuousEvolution(hermes_agent_path=tmp_path, benchmark_gate=False, resume=False)
+
+    import evolution.skills.evolve_skill as evolve_skill_mod
+
+    def boom(**kwargs):
+        raise BudgetExceededError("estimated cost $5.00 exceeds budget $1.00")
+
+    monkeypatch.setattr(evolve_skill_mod, "evolve", boom)
+
+    with pytest.raises(BudgetExceededError):
+        engine._optimize_target(_skill_target("demo"))
+
+
+def test_run_cycle_aborts_on_budget_exceeded(tmp_path: Path, monkeypatch):
+    """Once the budget blows, the cycle stops: no further targets are
+    optimized, the summary says why, and a checkpoint remains so a resume
+    with a raised budget re-runs the aborted target."""
+    monkeypatch.chdir(tmp_path)
+    engine = ContinuousEvolution(hermes_agent_path=tmp_path, benchmark_gate=False, resume=False)
+
+    monkeypatch.setattr(engine.monitor, "get_skill_metrics", lambda: [])
+    monkeypatch.setattr(engine.monitor, "get_tool_metrics", lambda: [])
+    monkeypatch.setattr(engine.monitor, "get_benchmark_trends", lambda: [])
+    monkeypatch.setattr(
+        engine.triage,
+        "triage",
+        lambda *args, **kwargs: [_skill_target("first"), _skill_target("second")],
+    )
+
+    import evolution.skills.evolve_skill as evolve_skill_mod
+
+    calls = []
+
+    def boom(**kwargs):
+        calls.append(kwargs["skill_name"])
+        raise BudgetExceededError("estimated cost $5.00 exceeds budget $1.00")
+
+    monkeypatch.setattr(evolve_skill_mod, "evolve", boom)
+
+    summary = engine.run_cycle()
+
+    assert summary["budget_exceeded"] is True
+    assert calls == ["first"]  # the second target was never attempted
+    assert summary["targets_optimized"] == 0
+    checkpoint = json.loads(engine.checkpoint_file.read_text())
+    remaining = [t["name"] for t in checkpoint["remaining_targets"]]
+    assert remaining == ["first", "second"]  # aborted target is re-run on resume
 
 
 def test_optimize_target_survives_per_target_evolution_error(tmp_path: Path, monkeypatch):

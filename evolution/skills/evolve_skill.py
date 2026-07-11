@@ -24,7 +24,7 @@ from evolution.core.config import (
 from evolution.core.constraints import ConstraintValidator
 from evolution.core.cost_tracker import set_budget_from_option
 from evolution.core.dataset_builder import EvalDataset, GoldenDatasetLoader, SyntheticDatasetBuilder
-from evolution.core.errors import EvolutionError
+from evolution.core.errors import BudgetExceededError, EvolutionError
 from evolution.core.external_importers import build_dataset_from_external
 from evolution.core.fitness import (
     LLMJudge,
@@ -215,6 +215,10 @@ def evolve(
             trainset=trainset,
             valset=valset,
         )
+    except BudgetExceededError:
+        # A budget abort is not "GEPA unavailable" — falling back to MIPROv2
+        # would start a second optimizer run past the hard budget.
+        raise
     except Exception as e:
         # Fall back to MIPROv2 if GEPA isn't available in this DSPy version
         console.print(f"[yellow]GEPA not available ({e}), falling back to MIPROv2[/yellow]")

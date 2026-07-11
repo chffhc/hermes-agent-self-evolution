@@ -163,63 +163,83 @@ class PRBuilder:
                 error=f"Failed to commit: {e.stderr}",
             )
 
-        # Push
+        # From here on the evolved commit exists on branch_name. Whatever
+        # happens with push/PR, leave the worktree back on the original
+        # branch so a later create_pr cannot branch off this run's commit
+        # and stack stale evolved changes into the next PR.
         try:
-            self._run_git(
-                ["push", "-u", "origin", branch_name],
-                cwd=self.hermes_agent_path,
-            )
-        except subprocess.CalledProcessError as e:
-            return PRResult(
-                success=False,
-                branch_name=branch_name,
-                error=f"Failed to push: {e.stderr}",
-            )
+            # Push
+            try:
+                self._run_git(
+                    ["push", "-u", "origin", branch_name],
+                    cwd=self.hermes_agent_path,
+                )
+            except subprocess.CalledProcessError as e:
+                return PRResult(
+                    success=False,
+                    branch_name=branch_name,
+                    error=f"Failed to push: {e.stderr}",
+                )
 
-        # Create PR via gh CLI
-        pr_body = redact_secrets(self._build_pr_body(changes, metrics, diff_summary))
-        pr_title = f"{title_prefix}: {' & '.join(change_names)} (proxy score {metrics.baseline_score:.3f} → {metrics.evolved_score:.3f})"
+            # Create PR via gh CLI
+            pr_body = redact_secrets(self._build_pr_body(changes, metrics, diff_summary))
+            pr_title = f"{title_prefix}: {' & '.join(change_names)} (proxy score {metrics.baseline_score:.3f} → {metrics.evolved_score:.3f})"
 
-        try:
-            pr_output = subprocess.run(
-                ["gh", "pr", "create", "--title", pr_title, "--body", pr_body, "--base", "main"],
-                cwd=str(self.hermes_agent_path),
-                capture_output=True,
-                text=True,
-            )
-        except FileNotFoundError:
-            # gh CLI not installed — the branch is pushed but there is no PR.
+            try:
+                pr_output = subprocess.run(
+                    [
+                        "gh",
+                        "pr",
+                        "create",
+                        "--title",
+                        pr_title,
+                        "--body",
+                        pr_body,
+                        "--base",
+                        "main",
+                    ],
+                    cwd=str(self.hermes_agent_path),
+                    capture_output=True,
+                    text=True,
+                )
+            except FileNotFoundError:
+                # gh CLI not installed — the branch is pushed but there is no PR.
+                return PRResult(
+                    success=False,
+                    branch_name=branch_name,
+                    error="Branch pushed but no PR created: gh CLI not found. Create the PR manually.",
+                    diff_summary=diff_summary,
+                    branch_pushed=True,
+                    pr_created=False,
+                )
+
+            if pr_output.returncode != 0:
+                import logging
+
+                stderr = (pr_output.stderr or "").strip()
+                logging.getLogger(__name__).warning("gh pr create failed: %s", stderr)
+                return PRResult(
+                    success=False,
+                    branch_name=branch_name,
+                    error=f"Branch pushed but gh pr create failed: {stderr}",
+                    diff_summary=diff_summary,
+                    branch_pushed=True,
+                    pr_created=False,
+                )
+
             return PRResult(
-                success=False,
+                success=True,
                 branch_name=branch_name,
-                error="Branch pushed but no PR created: gh CLI not found. Create the PR manually.",
+                pr_url=pr_output.stdout.strip(),
                 diff_summary=diff_summary,
                 branch_pushed=True,
-                pr_created=False,
+                pr_created=True,
             )
-
-        if pr_output.returncode != 0:
-            import logging
-
-            stderr = (pr_output.stderr or "").strip()
-            logging.getLogger(__name__).warning("gh pr create failed: %s", stderr)
-            return PRResult(
-                success=False,
-                branch_name=branch_name,
-                error=f"Branch pushed but gh pr create failed: {stderr}",
-                diff_summary=diff_summary,
-                branch_pushed=True,
-                pr_created=False,
-            )
-
-        return PRResult(
-            success=True,
-            branch_name=branch_name,
-            pr_url=pr_output.stdout.strip(),
-            diff_summary=diff_summary,
-            branch_pushed=True,
-            pr_created=True,
-        )
+        finally:
+            if original_branch:
+                self._run_git(
+                    ["checkout", original_branch], cwd=self.hermes_agent_path, check=False
+                )
 
     def _generate_diff_summary(self, changes: list[PRChange]) -> str:
         """Generate a unified diff summary for all changes."""

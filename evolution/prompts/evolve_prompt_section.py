@@ -31,7 +31,7 @@ from rich.console import Console
 from rich.table import Table
 
 from evolution.core.config import EvolutionConfig, resolve_hermes_agent_path
-from evolution.core.errors import EvolutionError
+from evolution.core.errors import BudgetExceededError, EvolutionError
 from evolution.core.utils import parse_json_array
 
 console = Console()
@@ -286,6 +286,8 @@ class BehavioralTestGenerator:
                             should_not_do=ex.get("should_not_do"),
                         )
                     )
+            except BudgetExceededError:
+                raise  # Hard budget must abort dataset generation, not skip a batch.
             except Exception as e:
                 console.print(f"    ⚠ Failed: {e}")
 
@@ -701,6 +703,10 @@ def evolve_prompt_section(
         elapsed = time.time() - start_time
         console.print(f"\n  Optimization completed in {elapsed:.1f}s")
 
+    except BudgetExceededError:
+        # A budget abort is not "GEPA unavailable" — falling back to MIPROv2
+        # would start a second optimizer run past the hard budget.
+        raise
     except Exception as e:
         # Fall back to MIPROv2 if GEPA isn't available
         console.print(f"[yellow]GEPA not available ({e}), falling back to MIPROv2[/yellow]")
