@@ -1,6 +1,11 @@
 """Core infrastructure shared across all evolution phases."""
 
-from evolution.core.benchmark_gate import BenchmarkGate, BenchmarkResult, GateResult
+from evolution.core.benchmark_gate import (
+    BenchmarkGate,
+    BenchmarkResult,
+    GateResult,
+    resolve_benchmark_runner,
+)
 from evolution.core.config import EvolutionConfig, get_hermes_agent_path
 from evolution.core.constraints import ConstraintResult, ConstraintValidator
 from evolution.core.dataset_builder import (
@@ -34,5 +39,6 @@ __all__ = [
     "SyntheticDatasetBuilder",
     "get_hermes_agent_path",
     "make_llm_judge_metric",
+    "resolve_benchmark_runner",
     "skill_fitness_metric",
 ]

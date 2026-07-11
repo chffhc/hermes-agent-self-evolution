@@ -140,10 +140,10 @@ real Hermes `batch_runner`/independent-judge evaluation is connected.
 Current hardening status:
 1. **Full test suite** — Phase 1 can run a pytest gate with `--run-tests`; CI now fails on lint/test failures.
 2. **Size limits** — Skills and tool descriptions are checked before output is accepted.
-3. **Benchmark gate** — benchmark errors/regressions are fail-closed by default.
+3. **Benchmark gate** — benchmark errors/regressions are fail-closed by default. Runner discovery: an explicit `runner_path`/`EVOLUTION_BENCH_RUNNER` override wins (and fails closed if the configured path is missing), then hermes-agent's `environments/benchmarks/run_bench.py`, then this repo's `benchmarks/run_bench.py` smoke runner. The smoke runner executes real deterministic checks (Python syntax over the target repo, skill-override validation) and its results are labeled `[smoke]` so smoke scores never share a baseline namespace with real TBLite/YC-Bench scores — smoke evidence is a proxy, not a capability benchmark.
 4. **Code evolution isolation** — the default Phase 4 engine is OpenEvolve patch-only; Darwinian Evolver is explicit opt-in and may mutate a checkout in place.
 5. **PR review** — PR generation helpers exist but are not yet wired into the main optimization flows; review generated artifacts manually.
-6. **Phase 5 readiness gate** — a live continuous cycle refuses to start unless the fail-closed `--status` checks pass (resolvable hermes-agent repo, benchmark runner present, hard USD budget configured, writable output dir); dry runs are exempt, and `--skip-readiness-check` is an explicit override.
+6. **Phase 5 readiness gate** — a live continuous cycle refuses to start unless the fail-closed `--status` checks pass (resolvable hermes-agent repo, a discoverable benchmark runner — the report labels it when only the local smoke runner is available, hard USD budget configured, writable output dir); dry runs are exempt, and `--skip-readiness-check` is an explicit override.
 
 ## Full Plan
 

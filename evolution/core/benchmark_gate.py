@@ -10,6 +10,13 @@ Three benchmark tiers:
 
 Benchmarks are GATES, not fitness functions. A variant that improves
 skill quality but drops benchmark scores is REJECTED.
+
+Runner discovery (see resolve_benchmark_runner): an explicit runner path or
+the EVOLUTION_BENCH_RUNNER env var wins; otherwise the hermes-agent repo's
+``environments/benchmarks/run_bench.py`` is used; otherwise this repo's own
+``benchmarks/run_bench.py`` smoke runner. Smoke results are honestly labeled:
+their benchmark name gets a ``[smoke]`` suffix so smoke scores and real
+TBLite/YC-Bench scores never share a baseline namespace.
 """
 
 import json
@@ -19,6 +26,42 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+
+BENCH_RUNNER_ENV = "EVOLUTION_BENCH_RUNNER"
+
+# This repo's own smoke runner — the last-resort fallback when the
+# hermes-agent checkout ships no benchmark infrastructure.
+LOCAL_SMOKE_RUNNER = Path(__file__).resolve().parents[2] / "benchmarks" / "run_bench.py"
+
+
+def resolve_benchmark_runner(
+    hermes_agent_path: Path,
+    runner_path: Path | str | None = None,
+) -> tuple[Path, str] | None:
+    """Locate the benchmark runner script to shell out to.
+
+    Returns ``(path, source)`` where source is one of ``configured``, ``env``,
+    ``hermes-agent``, or ``local-smoke`` — or None when nothing usable exists.
+    An explicitly configured path (argument or env var) that does not exist
+    fails closed instead of silently falling through to a different runner.
+    """
+    if runner_path:
+        p = Path(runner_path).expanduser()
+        return (p, "configured") if p.is_file() else None
+
+    env_path = os.getenv(BENCH_RUNNER_ENV)
+    if env_path:
+        p = Path(env_path).expanduser()
+        return (p, "env") if p.is_file() else None
+
+    hermes_runner = hermes_agent_path / "environments" / "benchmarks" / "run_bench.py"
+    if hermes_runner.is_file():
+        return hermes_runner, "hermes-agent"
+
+    if LOCAL_SMOKE_RUNNER.is_file():
+        return LOCAL_SMOKE_RUNNER, "local-smoke"
+
+    return None
 
 
 @dataclass
@@ -59,8 +102,10 @@ class BenchmarkGate:
         hermes_agent_path: Path | None = None,
         max_regression: float = 0.02,
         baseline_file: Path | None = None,
+        runner_path: Path | str | None = None,
     ):
         self.hermes_agent_path = hermes_agent_path or Path.home() / ".hermes" / "hermes-agent"
+        self.runner_path = runner_path
         self.max_regression = max_regression
         self.baseline_file = baseline_file or Path("benchmarks/baselines.json")
         self.baseline_scores = self._load_baselines()
@@ -155,22 +200,30 @@ class BenchmarkGate:
             timestamp=datetime.now().isoformat(),
         )
 
-        # Check if hermes-agent has the benchmark infrastructure
-        bench_dir = self.hermes_agent_path / "environments" / "benchmarks"
-        if not bench_dir.exists():
-            result.error = f"Benchmark directory not found: {bench_dir}"
+        if not self.hermes_agent_path.is_dir():
+            result.error = f"hermes-agent repo not found: {self.hermes_agent_path}"
             result.elapsed_seconds = time.time() - start
             return result
 
-        # Try to run the benchmark via subprocess
-        # This assumes hermes-agent has a benchmark runner script
-        runner = bench_dir / "run_bench.py"
-        if not runner.exists():
-            # Fallback: simulate with a placeholder
-            # In production, this would call the actual benchmark runner
-            result.error = f"Benchmark runner not found: {runner}"
+        resolved = resolve_benchmark_runner(self.hermes_agent_path, self.runner_path)
+        if resolved is None:
+            result.error = (
+                "No benchmark runner available: "
+                f"configured runner_path={self.runner_path!r}, "
+                f"{BENCH_RUNNER_ENV}={os.getenv(BENCH_RUNNER_ENV)!r}, "
+                f"hermes-agent runner missing at "
+                f"{self.hermes_agent_path / 'environments' / 'benchmarks' / 'run_bench.py'}, "
+                f"local smoke runner missing at {LOCAL_SMOKE_RUNNER}"
+            )
             result.elapsed_seconds = time.time() - start
             return result
+
+        runner, runner_source = resolved
+        if runner_source == "local-smoke":
+            # Keep smoke scores in their own baseline namespace: comparing a
+            # smoke pass rate against a real TBLite baseline would either
+            # always fail or, worse, mask a real regression.
+            result.name = f"{name}[smoke]"
 
         cmd = [sys.executable, str(runner), "--tasks", str(task_count)]
         override_path = None
@@ -216,7 +269,11 @@ class BenchmarkGate:
                 result.score = (
                     result.passed_tasks / result.total_tasks if result.total_tasks > 0 else 0.0
                 )
-                result.details = output
+                result.details = {
+                    **output,
+                    "runner_path": str(runner),
+                    "runner_source": runner_source,
+                }
             else:
                 result.error = proc.stderr.strip() or f"Exit code: {proc.returncode}"
 
@@ -314,10 +371,10 @@ def establish_baselines(
         if result.error:
             print(f"    ⚠ Skipped: {result.error}")
         else:
-            print(
-                f"    ✓ Score: {result.score:.3f} " f"({result.passed_tasks}/{result.total_tasks})"
-            )
-            gate.update_baseline(name, result.score)
+            print(f"    ✓ Score: {result.score:.3f} ({result.passed_tasks}/{result.total_tasks})")
+            # Key by result.name, not the loop name: smoke-runner results are
+            # renamed with a [smoke] suffix and must baseline under that key.
+            gate.update_baseline(result.name, result.score)
 
     print(f"\n  Baselines saved to {gate.baseline_file}")
     return gate.baseline_scores

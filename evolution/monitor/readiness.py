@@ -19,6 +19,7 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from evolution.core.benchmark_gate import BENCH_RUNNER_ENV, resolve_benchmark_runner
 from evolution.core.config import resolve_hermes_agent_path
 from evolution.core.cost_tracker import tracker
 
@@ -101,19 +102,26 @@ def check_phase5_readiness(
             )
         )
     else:
-        runner = repo / "environments" / "benchmarks" / "run_bench.py"
-        checks.append(
-            ReadinessCheck(
-                "benchmark_runner",
-                runner.is_file(),
-                True,
-                (
-                    f"benchmark runner at {runner}"
-                    if runner.is_file()
-                    else f"benchmark runner not found: {runner}"
-                ),
+        resolved = resolve_benchmark_runner(repo)
+        if resolved is None:
+            checks.append(
+                ReadinessCheck(
+                    "benchmark_runner",
+                    False,
+                    True,
+                    (
+                        f"no benchmark runner: {repo}/environments/benchmarks/run_bench.py "
+                        f"missing, no valid {BENCH_RUNNER_ENV} override, and no local "
+                        f"smoke runner"
+                    ),
+                )
             )
-        )
+        else:
+            runner, source = resolved
+            detail = f"benchmark runner at {runner} (source: {source})"
+            if source == "local-smoke":
+                detail += " — smoke/proxy evidence only, not TBLite/YC-Bench"
+            checks.append(ReadinessCheck("benchmark_runner", True, True, detail))
 
     # ── hard budget (required) ──────────────────────────────────────────
     # Unattended optimization without a hard USD cap is an unbounded spend.

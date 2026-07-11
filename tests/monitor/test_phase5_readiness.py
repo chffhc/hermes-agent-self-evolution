@@ -24,6 +24,12 @@ def restore_budget():
     tracker.set_budget(old)
 
 
+@pytest.fixture(autouse=True)
+def clear_runner_env(monkeypatch):
+    """Runner discovery honors EVOLUTION_BENCH_RUNNER; keep tests hermetic."""
+    monkeypatch.delenv("EVOLUTION_BENCH_RUNNER", raising=False)
+
+
 def _make_repo(tmp_path: Path, with_runner: bool = True) -> Path:
     repo = tmp_path / "hermes-agent"
     bench = repo / "environments" / "benchmarks"
@@ -68,9 +74,42 @@ def test_missing_hermes_repo_fails_closed(tmp_path: Path, monkeypatch):
     assert "benchmark_runner" in failing  # cannot verify without the repo
 
 
-def test_missing_benchmark_runner_fails_closed(tmp_path: Path, monkeypatch):
+def test_missing_hermes_runner_falls_back_to_local_smoke(tmp_path: Path, monkeypatch):
+    """Without the hermes-agent runner, the repo-owned smoke runner keeps
+    readiness green but the detail must honestly label the evidence level."""
     monkeypatch.chdir(tmp_path)
     repo = _make_repo(tmp_path, with_runner=False)
+    tracker.set_budget(5.0)
+
+    report = check_phase5_readiness(hermes_repo=str(repo), hermes_home=tmp_path / ".hermes")
+
+    assert report.ready
+    runner_check = _check(report, "benchmark_runner")
+    assert runner_check.ok
+    assert "smoke" in runner_check.detail
+    assert "not TBLite" in runner_check.detail
+
+
+def test_no_runner_anywhere_fails_closed(tmp_path: Path, monkeypatch):
+    import evolution.core.benchmark_gate as bg
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(bg, "LOCAL_SMOKE_RUNNER", tmp_path / "missing_run_bench.py")
+    repo = _make_repo(tmp_path, with_runner=False)
+    tracker.set_budget(5.0)
+
+    report = check_phase5_readiness(hermes_repo=str(repo), hermes_home=tmp_path / ".hermes")
+
+    assert not report.ready
+    assert {c.name for c in report.failing()} == {"benchmark_runner"}
+
+
+def test_env_override_pointing_at_missing_runner_fails_closed(tmp_path: Path, monkeypatch):
+    """An explicit EVOLUTION_BENCH_RUNNER that doesn't exist must not silently
+    fall through to a different runner."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("EVOLUTION_BENCH_RUNNER", str(tmp_path / "nope.py"))
+    repo = _make_repo(tmp_path, with_runner=True)
     tracker.set_budget(5.0)
 
     report = check_phase5_readiness(hermes_repo=str(repo), hermes_home=tmp_path / ".hermes")
