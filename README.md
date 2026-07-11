@@ -79,7 +79,10 @@ python -m evolution.code.evolve_tool_code \
     --engine darwinian \
     --iterations 10
 
-# Phase 5: Continuous improvement cycle
+# Phase 5: fail-closed readiness report (exit 0 = ready for a live cycle)
+python -m evolution.monitor.continuous_evolution --status
+
+# Phase 5: Continuous improvement cycle (refuses to start when --status fails)
 python -m evolution.monitor.continuous_evolution --cycle
 ```
 
@@ -140,6 +143,7 @@ Current hardening status:
 3. **Benchmark gate** — benchmark errors/regressions are fail-closed by default.
 4. **Code evolution isolation** — the default Phase 4 engine is OpenEvolve patch-only; Darwinian Evolver is explicit opt-in and may mutate a checkout in place.
 5. **PR review** — PR generation helpers exist but are not yet wired into the main optimization flows; review generated artifacts manually.
+6. **Phase 5 readiness gate** — a live continuous cycle refuses to start unless the fail-closed `--status` checks pass (resolvable hermes-agent repo, benchmark runner present, hard USD budget configured, writable output dir); dry runs are exempt, and `--skip-readiness-check` is an explicit override.
 
 ## Full Plan
 

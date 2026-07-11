@@ -33,6 +33,7 @@ from rich.console import Console
 from evolution.core.benchmark_gate import BenchmarkGate
 from evolution.core.config import get_hermes_agent_path
 from evolution.core.errors import BudgetExceededError
+from evolution.monitor.readiness import check_phase5_readiness
 
 console = Console()
 
@@ -831,6 +832,12 @@ def main():
         description="Hermes Agent Self-Evolution — Continuous Improvement Loop"
     )
     parser.add_argument("--cycle", action="store_true", help="Run one improvement cycle")
+    parser.add_argument(
+        "--status",
+        action="store_true",
+        help="Print the Phase 5 readiness report as JSON and exit "
+        "(exit code 0 when ready, 1 when not)",
+    )
     parser.add_argument("--setup-cron", action="store_true", help="Set up cron jobs")
     parser.add_argument("--dry-run", action="store_true", help="Show what would be done")
     parser.add_argument("--hermes-repo", default=None, help="Path to hermes-agent repo")
@@ -840,6 +847,12 @@ def main():
     parser.add_argument("--model", default="qwen3.6-plus", help="Optimizer model")
     parser.add_argument("--max-targets", default=3, type=int, help="Max targets per cycle")
     parser.add_argument("--no-resume", action="store_true", help="Skip checkpoint resume")
+    parser.add_argument(
+        "--skip-readiness-check",
+        action="store_true",
+        help="Run a live cycle even when the fail-closed readiness gate fails "
+        "(dry runs never need this)",
+    )
     parser.add_argument(
         "--max-cost-usd",
         default=None,
@@ -862,7 +875,27 @@ def main():
         setup_cron_jobs()
         return
 
+    if args.status:
+        report = check_phase5_readiness(hermes_repo=args.hermes_repo)
+        print(json.dumps(report.to_dict(), indent=2))
+        raise SystemExit(0 if report.ready else 1)
+
     if args.cycle:
+        # Fail-closed gate: a live (non-dry-run) cycle must not start in an
+        # environment that cannot benchmark, has no hard budget, or has no
+        # resolvable hermes-agent repo. Dry runs make no API calls and may
+        # proceed for inspection purposes.
+        if not args.dry_run and not args.skip_readiness_check:
+            report = check_phase5_readiness(hermes_repo=args.hermes_repo)
+            if not report.ready:
+                print(json.dumps(report.to_dict(), indent=2))
+                failing = ", ".join(c.name for c in report.failing())
+                print(
+                    f"Refusing to run a live cycle — readiness gate failed ({failing}). "
+                    "Fix the checks above, or pass --skip-readiness-check to override."
+                )
+                raise SystemExit(1)
+
         evolution = ContinuousEvolution(
             hermes_agent_path=Path(args.hermes_repo) if args.hermes_repo else None,
             max_targets=args.max_targets,

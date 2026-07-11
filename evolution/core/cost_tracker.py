@@ -79,6 +79,12 @@ class APICostTracker:
         with self._lock:
             return self._total_cost_usd
 
+    @property
+    def max_cost_usd(self) -> float | None:
+        """The configured hard budget in USD, or None when unset."""
+        with self._lock:
+            return self._max_cost_usd
+
     def record(
         self,
         model: str,
@@ -158,9 +164,9 @@ class APICostTracker:
         """Print cost summary to console."""
         s = self.summary()
         lines = []
-        lines.append(f"\n{'='*50}")
+        lines.append(f"\n{'=' * 50}")
         lines.append("  API Cost Summary")
-        lines.append(f"{'='*50}")
+        lines.append(f"{'=' * 50}")
         lines.append(f"  Total calls: {s.total_calls}")
         lines.append(f"  Input tokens:  {s.total_input_tokens:>10,}")
         lines.append(f"  Output tokens: {s.total_output_tokens:>10,}")
@@ -186,7 +192,7 @@ class APICostTracker:
                     f"${p['cost_usd']:.4f}"
                 )
 
-        lines.append(f"{'='*50}\n")
+        lines.append(f"{'=' * 50}\n")
         text = "\n".join(lines)
 
         if console:
