@@ -517,8 +517,18 @@ def evolve_tool_descriptions(
     tool_filter: list[str] | None = None,
     dataset_path: str | None = None,
     dry_run: bool = False,
+    create_pr: bool = False,
+    pr_dry_run: bool = False,
 ):
-    """Main function to evolve tool descriptions."""
+    """Main function to evolve tool descriptions.
+
+    ``create_pr``/``pr_dry_run`` are strictly opt-in: by default no PR-related
+    git operations happen at all. ``pr_dry_run`` renders the redacted PR
+    preview without touching git; ``create_pr`` invokes PRBuilder (which
+    itself enforces clean-worktree and redaction rules). Both are refused for
+    runs that failed constraint gates or showed no accuracy improvement, and
+    for descriptions that cannot be located verbatim in their source files.
+    """
 
     hermes_agent_path = resolve_hermes_agent_path(hermes_repo)
     config = EvolutionConfig(
@@ -676,7 +686,7 @@ def evolve_tool_descriptions(
 
     evolved_accuracy, evolved_per_tool = evaluator.evaluate(evolved_tools, dataset.holdout)
 
-    return finalize_tool_description_run(
+    metrics = finalize_tool_description_run(
         num_tools=len(tools),
         evolved_tools=evolved_tools,
         baseline_descriptions=baseline_descriptions,
@@ -688,6 +698,93 @@ def evolve_tool_descriptions(
         eval_model=eval_model,
         train_examples=len(dataset.train),
         holdout_examples=len(dataset.holdout),
+        val_examples=len(dataset.val),
+    )
+
+    # ── 7. Optional PR step (strictly opt-in; no-op by default) ─────────
+    if create_pr or pr_dry_run:
+        pr_info = _handle_pr_request(
+            create_pr=create_pr,
+            pr_dry_run=pr_dry_run,
+            hermes_agent_path=hermes_agent_path,
+            evolved_tools=evolved_tools,
+            baseline_descriptions=baseline_descriptions,
+            run_metrics=metrics,
+        )
+        output_dir = Path(metrics["output_dir"])
+        preview = pr_info.pop("preview", None)
+        if preview:
+            preview_path = output_dir / "pr_preview.md"
+            preview_path.write_text(preview, encoding="utf-8")
+            pr_info["preview_path"] = str(preview_path)
+            console.print(f"  PR preview saved to {preview_path}")
+        metrics["pr"] = pr_info
+        (output_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
+
+    return metrics
+
+
+def _handle_pr_request(
+    *,
+    create_pr: bool,
+    pr_dry_run: bool,
+    hermes_agent_path: Path,
+    evolved_tools: list[ToolDescription],
+    baseline_descriptions: dict[str, str],
+    run_metrics: dict,
+) -> dict:
+    """Opt-in PR step for Phase 2. Returns a JSON-serializable status dict.
+
+    Changed descriptions are proposed as exact-snippet replacements in their
+    hermes-agent source files; any description that cannot be located verbatim
+    (or matches ambiguously) refuses the whole PR rather than guessing.
+    """
+    from evolution.core.cost_tracker import tracker
+    from evolution.core.pr_builder import PRMetrics
+    from evolution.core.pr_optin import build_source_replacement_changes, handle_opt_in_pr
+
+    def build_changes():
+        replacements: dict[str, list[tuple[str, str]]] = {}
+        for tool in evolved_tools:
+            baseline = baseline_descriptions.get(tool.name)
+            if baseline is None:
+                return [], f"no baseline description recorded for tool '{tool.name}'"
+            if baseline == tool.description:
+                continue
+            replacements.setdefault(tool.file_path, []).append((baseline, tool.description))
+        if not replacements:
+            return [], "no changed tool descriptions to propose"
+        return build_source_replacement_changes(hermes_agent_path, replacements, "tool_description")
+
+    baseline_score = run_metrics["baseline_accuracy"]
+    improvement = run_metrics["improvement"]
+    pr_metrics = PRMetrics(
+        baseline_score=baseline_score,
+        evolved_score=run_metrics["evolved_accuracy"],
+        holdout_score=run_metrics["evolved_accuracy"],
+        improvement=improvement,
+        improvement_pct=improvement / max(0.001, baseline_score) * 100,
+        iterations=run_metrics["iterations"],
+        optimizer=f"GEPA ({run_metrics['optimizer_model']})",
+        eval_dataset_size=(
+            run_metrics["train_examples"]
+            + run_metrics.get("val_examples", 0)
+            + run_metrics["holdout_examples"]
+        ),
+        train_examples=run_metrics["train_examples"],
+        val_examples=run_metrics.get("val_examples", 0),
+        holdout_examples=run_metrics["holdout_examples"],
+        elapsed_seconds=run_metrics["elapsed_seconds"],
+        cost_estimate=f"~${tracker.total_cost_usd:.2f} (estimated)",
+    )
+
+    return handle_opt_in_pr(
+        create_pr=create_pr,
+        pr_dry_run=pr_dry_run,
+        hermes_agent_path=hermes_agent_path,
+        run_metrics=run_metrics,
+        build_changes=build_changes,
+        pr_metrics=pr_metrics,
     )
 
 
@@ -703,6 +800,7 @@ def finalize_tool_description_run(
     eval_model: str,
     train_examples: int,
     holdout_examples: int,
+    val_examples: int = 0,
     output_root: Path = Path("output/tool_descriptions"),
 ) -> dict:
     """Validate, persist, and report an evolution run — failing closed.
@@ -762,6 +860,7 @@ def finalize_tool_description_run(
         "output_dir": str(output_dir),
         "elapsed_seconds": elapsed,
         "train_examples": train_examples,
+        "val_examples": val_examples,
         "holdout_examples": holdout_examples,
     }
     (output_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
@@ -826,8 +925,29 @@ def finalize_tool_description_run(
     help="Hard USD budget for LLM API cost; the run aborts once estimated spend "
     "exceeds it (overrides EVOLUTION_MAX_COST_USD)",
 )
+@click.option(
+    "--create-pr",
+    is_flag=True,
+    help="After a deployable accuracy improvement, create a PR against hermes-agent "
+    "via PRBuilder (requires clean worktree; never happens by default)",
+)
+@click.option(
+    "--pr-dry-run",
+    is_flag=True,
+    help="Render the redacted PR title/body/diff without any git or GitHub "
+    "side effects (takes precedence over --create-pr)",
+)
 def main(
-    iterations, optimizer_model, eval_model, hermes_repo, tool, dataset_path, dry_run, max_cost_usd
+    iterations,
+    optimizer_model,
+    eval_model,
+    hermes_repo,
+    tool,
+    dataset_path,
+    dry_run,
+    max_cost_usd,
+    create_pr,
+    pr_dry_run,
 ):
     """Evolve tool descriptions using DSPy + GEPA optimization."""
     from evolution.core.cost_tracker import set_budget_from_option
@@ -842,6 +962,8 @@ def main(
             tool_filter=list(tool) if tool else None,
             dataset_path=dataset_path,
             dry_run=dry_run,
+            create_pr=create_pr,
+            pr_dry_run=pr_dry_run,
         )
     except EvolutionError as e:
         console.print(f"[red]✗ {e}[/red]")

@@ -2,31 +2,49 @@
 
 The narrative numbers below document one specific historical smoke-test run
 (arxiv skill, MiniMax M2.5, keyword-overlap proxy) and are intentionally
-hardcoded as a historical record. For metrics-driven reporting of newer runs,
-read real artifacts via evolution.core.run_metrics (load_run_metrics /
-find_latest_run_metrics) instead of copying numbers into prose.
+hardcoded as a historical record. Pass --metrics <path-to-metrics.json> to
+additionally render a "Measured Run" section built from a real run artifact
+via evolution.core.run_metrics + evolution.core.report_summary (both
+fail closed on missing/malformed data).
+
+reportlab is imported lazily inside build_report so the summary logic stays
+importable/testable in environments without reportlab installed.
 """
 
 from datetime import datetime
 
-from reportlab.lib.colors import HexColor, white
-from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY
-from reportlab.lib.pagesizes import letter
-from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-from reportlab.lib.units import inch
-from reportlab.platypus import (
-    HRFlowable,
-    PageBreak,
-    Paragraph,
-    SimpleDocTemplate,
-    Spacer,
-    Table,
-    TableStyle,
-)
+from evolution.core.report_summary import build_run_summary
 
 
-def build_report(output_path: str = "reports/phase1_validation_report.pdf"):
+def build_report(
+    output_path: str = "reports/phase1_validation_report.pdf",
+    run_metrics: dict | None = None,
+):
     import os
+
+    from reportlab.lib.colors import HexColor, white
+    from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import inch
+    from reportlab.platypus import (
+        HRFlowable,
+        PageBreak,
+        Paragraph,
+        SimpleDocTemplate,
+        Spacer,
+        Table,
+        TableStyle,
+    )
+
+    run_summary = None
+    if run_metrics is not None:
+        run_summary = build_run_summary(run_metrics)
+        if run_summary is None:
+            raise ValueError(
+                "run metrics lack a usable baseline/evolved score pair; "
+                "refusing to render a measured-run section from them"
+            )
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
@@ -223,6 +241,30 @@ def build_report(output_path: str = "reports/phase1_validation_report.pdf"):
     story.append(Spacer(1, 0.2 * inch))
     story.append(result_table)
     story.append(Spacer(1, 0.3 * inch))
+
+    # ── MEASURED RUN (optional, from a real metrics.json artifact) ──────
+    if run_summary is not None:
+        story.append(Paragraph(run_summary["title"], styles["SectionHead"]))
+        measured_data = [["Metric", "Value"]] + [list(row) for row in run_summary["rows"]]
+        measured_table = Table(measured_data, colWidths=[2.2 * inch, 3.8 * inch])
+        measured_table.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), HexColor("#1a1a2e")),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), white),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("FONTSIZE", (0, 0), (-1, -1), 9.5),
+                    ("GRID", (0, 0), (-1, -1), 0.5, HexColor("#cccccc")),
+                    ("TOPPADDING", (0, 0), (-1, -1), 5),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 8),
+                    ("FONTNAME", (0, 1), (0, -1), "Helvetica-Bold"),
+                ]
+            )
+        )
+        story.append(measured_table)
+        story.append(Spacer(1, 0.1 * inch))
+        story.append(Paragraph(run_summary["caveat"], styles["BodyJust"]))
 
     # ── BACKGROUND ──────────────────────────────────────────────────────
     story.append(Paragraph("Background", styles["SectionHead"]))
@@ -628,5 +670,34 @@ def build_report(output_path: str = "reports/phase1_validation_report.pdf"):
 
 
 if __name__ == "__main__":
-    path = build_report()
+    import argparse
+    from pathlib import Path
+
+    parser = argparse.ArgumentParser(
+        description="Generate the Phase 1 validation report PDF. By default this is "
+        "the hardcoded historical smoke-test record; pass --metrics to also render "
+        "a measured-run section from a real metrics.json artifact."
+    )
+    parser.add_argument(
+        "--metrics",
+        default=None,
+        help="Path to a run's metrics.json (written by the evolution entrypoints); "
+        "adds a measured-run section. Omit for the historical report only.",
+    )
+    parser.add_argument(
+        "--output",
+        default="reports/phase1_validation_report.pdf",
+        help="Output PDF path",
+    )
+    args = parser.parse_args()
+
+    run_metrics = None
+    if args.metrics:
+        from evolution.core.run_metrics import load_run_metrics
+
+        run_metrics = load_run_metrics(Path(args.metrics))
+        if run_metrics is None:
+            raise SystemExit(f"Could not load run metrics from {args.metrics} (missing or invalid)")
+
+    path = build_report(args.output, run_metrics=run_metrics)
     print(f"Report generated: {path}")
