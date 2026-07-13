@@ -7,7 +7,11 @@ producing a partial summary that could overstate results.
 
 from __future__ import annotations
 
-from evolution.core.report_summary import PROXY_CAVEAT, build_run_summary
+from evolution.core.report_summary import (
+    PROXY_CAVEAT,
+    build_run_summary,
+    render_markdown_summary,
+)
 
 
 def _skill_metrics(**overrides) -> dict:
@@ -95,6 +99,31 @@ def test_non_dict_and_malformed_scores_fail_closed():
     assert build_run_summary(["not", "a", "dict"]) is None
     assert build_run_summary({"baseline_score": "0.4", "evolved_score": 0.5}) is None
     assert build_run_summary({"baseline_score": True, "evolved_score": 0.5}) is None
+
+
+def test_render_markdown_summary_contains_title_table_and_caveat():
+    markdown = render_markdown_summary(build_run_summary(_skill_metrics()))
+
+    lines = markdown.splitlines()
+    assert lines[0].startswith("# Measured run — skill 'arxiv'")
+    assert "| Metric | Value |" in lines
+    assert "| Baseline score (proxy) | 0.408 |" in lines
+    assert "| Evolved score (proxy) | 0.569 |" in lines
+    assert "| Change | +0.161 |" in lines
+    assert "| Passed local gates (deployable) | yes |" in lines
+    assert f"> {PROXY_CAVEAT}" in lines
+    assert "not validated production benchmarks" in markdown
+
+
+def test_render_markdown_summary_escapes_table_breaking_characters():
+    summary = build_run_summary(_skill_metrics(output_dir="output/weird|dir\nname"))
+
+    markdown = render_markdown_summary(summary)
+
+    assert "output/weird\\|dir name" in markdown
+    # Every table row must still be a single well-formed line.
+    table_lines = [line for line in markdown.splitlines() if line.startswith("|")]
+    assert all(line.count("|") - line.count("\\|") == 3 for line in table_lines)
 
 
 def test_generate_report_importable_without_reportlab():

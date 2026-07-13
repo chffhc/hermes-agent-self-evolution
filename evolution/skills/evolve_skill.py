@@ -469,82 +469,60 @@ def _handle_pr_request(
     Refuses to build a PR for non-deployable runs or runs without a positive
     holdout proxy improvement — a PR must never be a way around the gates.
     ``pr_dry_run`` wins over ``create_pr``: it returns the redacted preview
-    under the ``preview`` key without any git/GitHub side effects.
+    under the ``preview`` key without any git/GitHub side effects. Gate,
+    preview, and PRBuilder semantics live in the shared opt-in helper; only
+    the change/metrics construction is Phase-1-specific (the skill file is
+    replaced wholesale rather than snippet-patched).
     """
-    info: dict = {
-        "requested": True,
-        "dry_run": bool(pr_dry_run),
-        "created": False,
-        "branch_pushed": False,
-        "url": None,
-        "error": None,
-        "skipped_reason": None,
-    }
+    from evolution.core.pr_optin import handle_opt_in_pr
 
-    if not run_metrics.get("deployable"):
-        info["skipped_reason"] = "run is not deployable (failed constraint/test gates)"
-    elif run_metrics.get("improvement", 0.0) <= 0:
-        info["skipped_reason"] = "no positive holdout proxy improvement"
-    if info["skipped_reason"]:
-        console.print(f"[yellow]⚠ Skipping PR: {info['skipped_reason']}[/yellow]")
-        return info
+    def build_changes():
+        from evolution.core.pr_builder import PRChange
 
-    from evolution.core.cost_tracker import tracker
-    from evolution.core.pr_builder import PRBuilder, PRChange, PRMetrics
+        return [
+            PRChange(
+                file_path=skill_relpath,
+                original_content=baseline_text,
+                evolved_content=evolved_text,
+                change_type="skill",
+            )
+        ], None
 
-    changes = [
-        PRChange(
-            file_path=skill_relpath,
-            original_content=baseline_text,
-            evolved_content=evolved_text,
-            change_type="skill",
+    def build_pr_metrics():
+        from evolution.core.cost_tracker import tracker
+        from evolution.core.pr_builder import PRMetrics
+
+        baseline_score = run_metrics["baseline_score"]
+        improvement = run_metrics["improvement"]
+        return PRMetrics(
+            baseline_score=baseline_score,
+            evolved_score=run_metrics["evolved_score"],
+            holdout_score=run_metrics["evolved_score"],
+            improvement=improvement,
+            improvement_pct=improvement / max(0.001, baseline_score) * 100,
+            iterations=run_metrics["iterations"],
+            optimizer=f"GEPA ({run_metrics['optimizer_model']})",
+            eval_dataset_size=(
+                run_metrics["train_examples"]
+                + run_metrics["val_examples"]
+                + run_metrics["holdout_examples"]
+            ),
+            train_examples=run_metrics["train_examples"],
+            val_examples=run_metrics["val_examples"],
+            holdout_examples=run_metrics["holdout_examples"],
+            elapsed_seconds=run_metrics["elapsed_seconds"],
+            cost_estimate=f"~${tracker.total_cost_usd:.2f} (estimated)",
         )
-    ]
-    baseline_score = run_metrics["baseline_score"]
-    improvement = run_metrics["improvement"]
-    pr_metrics = PRMetrics(
-        baseline_score=baseline_score,
-        evolved_score=run_metrics["evolved_score"],
-        holdout_score=run_metrics["evolved_score"],
-        improvement=improvement,
-        improvement_pct=improvement / max(0.001, baseline_score) * 100,
-        iterations=run_metrics["iterations"],
-        optimizer=f"GEPA ({run_metrics['optimizer_model']})",
-        eval_dataset_size=(
-            run_metrics["train_examples"]
-            + run_metrics["val_examples"]
-            + run_metrics["holdout_examples"]
-        ),
-        train_examples=run_metrics["train_examples"],
-        val_examples=run_metrics["val_examples"],
-        holdout_examples=run_metrics["holdout_examples"],
-        elapsed_seconds=run_metrics["elapsed_seconds"],
-        cost_estimate=f"~${tracker.total_cost_usd:.2f} (estimated)",
+
+    return handle_opt_in_pr(
+        create_pr=create_pr,
+        pr_dry_run=pr_dry_run,
+        hermes_agent_path=hermes_agent_path,
+        run_metrics=run_metrics,
+        build_changes=build_changes,
+        pr_metrics=build_pr_metrics,
+        no_improvement_reason="no positive holdout proxy improvement",
     )
-
-    builder = PRBuilder(hermes_agent_path=hermes_agent_path)
-
-    if pr_dry_run:
-        console.print("\n[bold]PR dry run — no branch, commit, push, or PR created.[/bold]")
-        info["preview"] = builder.preview_pr(changes, pr_metrics)
-        return info
-
-    result = builder.create_pr(changes, pr_metrics)
-    info["created"] = result.pr_created
-    info["branch_pushed"] = result.branch_pushed
-    info["branch_name"] = result.branch_name
-    info["url"] = result.pr_url
-    info["error"] = result.error
-    if result.pr_created:
-        console.print(f"[bold green]✓ PR created: {result.pr_url}[/bold green]")
-    elif result.branch_pushed:
-        console.print(
-            f"[yellow]⚠ Branch {result.branch_name} pushed but no PR created: "
-            f"{result.error}[/yellow]"
-        )
-    else:
-        console.print(f"[red]✗ PR creation failed: {result.error}[/red]")
-    return info
 
 
 def _failed_run_metrics(skill_name: str, output_dir: str, error: str) -> dict:

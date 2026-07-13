@@ -229,6 +229,80 @@ def test_branch_pushed_without_pr_is_not_created(monkeypatch, tmp_path):
     assert info["error"] == "gh CLI not found"
 
 
+def test_lazy_pr_metrics_never_built_for_refused_run(monkeypatch, tmp_path):
+    _forbid_subprocess(monkeypatch)
+
+    def _must_not_build_metrics():
+        raise AssertionError("pr_metrics callable invoked for a refused run")
+
+    info = handle_opt_in_pr(
+        create_pr=True,
+        pr_dry_run=False,
+        hermes_agent_path=tmp_path,
+        run_metrics=_run_metrics(deployable=False),
+        build_changes=lambda: ([_change()], None),
+        pr_metrics=_must_not_build_metrics,
+    )
+
+    assert info["created"] is False
+    assert "not deployable" in info["skipped_reason"]
+
+
+def test_lazy_pr_metrics_never_built_on_change_build_error(monkeypatch, tmp_path):
+    _forbid_subprocess(monkeypatch)
+
+    def _must_not_build_metrics():
+        raise AssertionError("pr_metrics callable invoked despite change-build failure")
+
+    info = handle_opt_in_pr(
+        create_pr=True,
+        pr_dry_run=False,
+        hermes_agent_path=tmp_path,
+        run_metrics=_run_metrics(),
+        build_changes=lambda: ([], "baseline text not found verbatim in tools/search.py"),
+        pr_metrics=_must_not_build_metrics,
+    )
+
+    assert info["created"] is False
+    assert "not found verbatim" in info["error"]
+
+
+def test_lazy_pr_metrics_resolved_on_create_path(monkeypatch, tmp_path):
+    import evolution.core.pr_builder as pr_builder_mod
+
+    monkeypatch.setattr(pr_builder_mod, "PRBuilder", FakePRBuilder)
+
+    info = handle_opt_in_pr(
+        create_pr=True,
+        pr_dry_run=False,
+        hermes_agent_path=tmp_path,
+        run_metrics=_run_metrics(),
+        build_changes=lambda: ([_change()], None),
+        pr_metrics=_pr_metrics,
+    )
+
+    assert info["created"] is True
+    _changes, pr_metrics, _prefix = FakePRBuilder.instances[0].create_pr_calls[0]
+    assert pr_metrics.baseline_score == pytest.approx(0.40)
+
+
+def test_custom_no_improvement_reason(monkeypatch, tmp_path):
+    _forbid_subprocess(monkeypatch)
+
+    info = handle_opt_in_pr(
+        create_pr=True,
+        pr_dry_run=False,
+        hermes_agent_path=tmp_path,
+        run_metrics=_run_metrics(improvement=0.0),
+        build_changes=lambda: ([_change()], None),
+        pr_metrics=_pr_metrics(),
+        no_improvement_reason="no positive holdout proxy improvement",
+    )
+
+    assert info["created"] is False
+    assert info["skipped_reason"] == "no positive holdout proxy improvement"
+
+
 # ── build_source_replacement_changes ────────────────────────────────────
 
 
@@ -313,6 +387,55 @@ def test_empty_snippets_fail_closed(tmp_path):
         tmp_path, {"tools.py": [("x", "   ")]}, "tool_description"
     )
     assert changes == [] and "empty evolved" in error
+
+
+def test_escaped_literal_falls_back_to_ast_patcher(tmp_path):
+    # The constant's decoded value has a real newline that the source spells
+    # as "\n" — exact-snippet matching cannot find it, the AST patcher can.
+    source = tmp_path / "prompts.py"
+    source.write_text('GUIDANCE = "line one\\nline two"\n', encoding="utf-8")
+
+    changes, error = build_source_replacement_changes(
+        tmp_path,
+        {"prompts.py": [("line one\nline two", "line one\nline two improved")]},
+        "prompt_section",
+    )
+
+    assert error is None
+    assert len(changes) == 1
+    evolved_module = {}
+    exec(changes[0].evolved_content, evolved_module)
+    assert evolved_module["GUIDANCE"] == "line one\nline two improved"
+    # Source file untouched; only the PRChange carries the patch.
+    assert source.read_text(encoding="utf-8") == 'GUIDANCE = "line one\\nline two"\n'
+
+
+def test_ast_fallback_ambiguity_fails_closed(tmp_path):
+    (tmp_path / "prompts.py").write_text('A = "dup\\ntext"\nB = "dup\\ntext"\n', encoding="utf-8")
+
+    changes, error = build_source_replacement_changes(
+        tmp_path,
+        {"prompts.py": [("dup\ntext", "new\ntext")]},
+        "prompt_section",
+    )
+
+    assert changes == []
+    assert "not found verbatim" in error
+    assert "ambiguous" in error
+
+
+def test_ast_fallback_not_attempted_for_non_python_files(tmp_path):
+    (tmp_path / "SKILL.md").write_text("something else entirely\n", encoding="utf-8")
+
+    changes, error = build_source_replacement_changes(
+        tmp_path,
+        {"SKILL.md": [("line one\nline two", "new")]},
+        "skill",
+    )
+
+    assert changes == []
+    assert "not found verbatim" in error
+    assert "refusing to guess" in error
 
 
 def test_no_effective_change_fails_closed(tmp_path):

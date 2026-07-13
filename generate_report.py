@@ -1,4 +1,4 @@
-"""Generate the Phase 1 validation report as PDF.
+"""Generate the Phase 1 validation report.
 
 The narrative numbers below document one specific historical smoke-test run
 (arxiv skill, MiniMax M2.5, keyword-overlap proxy) and are intentionally
@@ -7,13 +7,16 @@ additionally render a "Measured Run" section built from a real run artifact
 via evolution.core.run_metrics + evolution.core.report_summary (both
 fail closed on missing/malformed data).
 
+--format markdown writes a stdlib-only measured-run summary instead of the
+PDF; it requires --metrics because it contains nothing but the measured run.
+
 reportlab is imported lazily inside build_report so the summary logic stays
 importable/testable in environments without reportlab installed.
 """
 
 from datetime import datetime
 
-from evolution.core.report_summary import build_run_summary
+from evolution.core.report_summary import build_run_summary, render_markdown_summary
 
 
 def build_report(
@@ -669,14 +672,38 @@ def build_report(
     return output_path
 
 
-if __name__ == "__main__":
+def build_markdown_report(output_path: str, run_metrics: dict) -> str:
+    """Write a stdlib-only Markdown summary of one measured run.
+
+    Unlike the PDF, this contains no historical narrative — only the
+    measured-run table and the proxy caveat, so it can never restate the
+    hardcoded smoke-test claims alongside newer numbers. Raises ValueError
+    when the metrics lack a usable baseline/evolved score pair.
+    """
+    from pathlib import Path
+
+    run_summary = build_run_summary(run_metrics)
+    if run_summary is None:
+        raise ValueError(
+            "run metrics lack a usable baseline/evolved score pair; "
+            "refusing to render a measured-run summary from them"
+        )
+
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(render_markdown_summary(run_summary), encoding="utf-8")
+    return str(output)
+
+
+def main(argv: list[str] | None = None) -> str:
     import argparse
     from pathlib import Path
 
     parser = argparse.ArgumentParser(
-        description="Generate the Phase 1 validation report PDF. By default this is "
-        "the hardcoded historical smoke-test record; pass --metrics to also render "
-        "a measured-run section from a real metrics.json artifact."
+        description="Generate the Phase 1 validation report. By default this is "
+        "the hardcoded historical smoke-test record as PDF; pass --metrics to also "
+        "render a measured-run section from a real metrics.json artifact, or "
+        "--format markdown for a stdlib-only measured-run summary."
     )
     parser.add_argument(
         "--metrics",
@@ -686,10 +713,18 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--output",
-        default="reports/phase1_validation_report.pdf",
-        help="Output PDF path",
+        default=None,
+        help="Output path (default: reports/phase1_validation_report.pdf for pdf, "
+        "reports/measured_run_summary.md for markdown)",
     )
-    args = parser.parse_args()
+    parser.add_argument(
+        "--format",
+        choices=["pdf", "markdown"],
+        default="pdf",
+        help="pdf renders the full report via reportlab; markdown writes only the "
+        "measured-run summary (stdlib-only, requires --metrics)",
+    )
+    args = parser.parse_args(argv)
 
     run_metrics = None
     if args.metrics:
@@ -699,5 +734,20 @@ if __name__ == "__main__":
         if run_metrics is None:
             raise SystemExit(f"Could not load run metrics from {args.metrics} (missing or invalid)")
 
-    path = build_report(args.output, run_metrics=run_metrics)
+    if args.format == "markdown":
+        if run_metrics is None:
+            raise SystemExit(
+                "--format markdown requires --metrics: the markdown report contains "
+                "only the measured-run summary"
+            )
+        path = build_markdown_report(args.output or "reports/measured_run_summary.md", run_metrics)
+    else:
+        path = build_report(
+            args.output or "reports/phase1_validation_report.pdf", run_metrics=run_metrics
+        )
     print(f"Report generated: {path}")
+    return path
+
+
+if __name__ == "__main__":
+    main()

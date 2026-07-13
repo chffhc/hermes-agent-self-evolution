@@ -40,6 +40,11 @@ def build_source_replacement_changes(
     ambiguous snippet aborts the whole change set with an error instead of
     guessing — a partially applied PR would silently drop evolved content.
 
+    When the baseline text is not a verbatim substring of a ``.py`` file —
+    typically because the literal spells it with escape sequences — an
+    AST-based patcher (evolution.core.source_patch) is tried before refusing;
+    it itself fails closed on any ambiguity or non-round-trippable rewrite.
+
     Returns ``(changes, None)`` on success or ``([], error)`` on refusal.
     """
     changes: list[PRChange] = []
@@ -59,17 +64,30 @@ def build_source_replacement_changes(
             if not evolved_snippet.strip():
                 return [], f"empty evolved snippet for {relpath}"
             count = patched.count(baseline_snippet)
-            if count == 0:
-                return [], (
-                    f"baseline text not found verbatim in {relpath}; "
-                    "refusing to guess where the evolved text belongs"
-                )
             if count > 1:
                 return [], (
                     f"baseline text appears {count} times in {relpath}; "
                     "replacement would be ambiguous"
                 )
-            patched = patched.replace(baseline_snippet, evolved_snippet, 1)
+            if count == 1:
+                patched = patched.replace(baseline_snippet, evolved_snippet, 1)
+                continue
+            if not relpath.endswith(".py"):
+                return [], (
+                    f"baseline text not found verbatim in {relpath}; "
+                    "refusing to guess where the evolved text belongs"
+                )
+            from evolution.core.source_patch import replace_string_constant
+
+            ast_patched, ast_error = replace_string_constant(
+                patched, baseline_snippet, evolved_snippet
+            )
+            if ast_patched is None:
+                return [], (
+                    f"baseline text not found verbatim in {relpath} and the AST "
+                    f"string-constant patcher refused: {ast_error}"
+                )
+            patched = ast_patched
 
         if patched != original:
             changes.append(
@@ -93,14 +111,23 @@ def handle_opt_in_pr(
     hermes_agent_path: Path,
     run_metrics: dict,
     build_changes: Callable[[], tuple[list[PRChange], str | None]],
-    pr_metrics: PRMetrics,
+    pr_metrics: PRMetrics | Callable[[], PRMetrics],
     title_prefix: str = "evolve",
+    no_improvement_reason: str = "no positive proxy improvement",
 ) -> dict:
     """Gate and execute an opt-in PR request. Returns a JSON-serializable dict.
 
     ``build_changes`` is only invoked after the deployability/improvement
     gates pass, so refused runs never touch hermes-agent files at all. Its
     ``(changes, error)`` contract matches build_source_replacement_changes.
+
+    ``pr_metrics`` may be a PRMetrics or a zero-arg callable returning one;
+    a callable is likewise only invoked after the gates pass, so callers can
+    read score fields that failed-run metrics dicts don't have.
+
+    ``no_improvement_reason`` lets phases keep their exact refusal wording
+    (e.g. Phase 1 says "holdout proxy" because its scores come from a held-out
+    split) without changing the gate itself.
     """
     info: dict = {
         "requested": True,
@@ -115,7 +142,7 @@ def handle_opt_in_pr(
     if not run_metrics.get("deployable"):
         info["skipped_reason"] = "run is not deployable (failed constraint/test gates)"
     elif run_metrics.get("improvement", 0.0) <= 0:
-        info["skipped_reason"] = "no positive proxy improvement"
+        info["skipped_reason"] = no_improvement_reason
     if info["skipped_reason"]:
         console.print(f"[yellow]⚠ Skipping PR: {info['skipped_reason']}[/yellow]")
         return info
@@ -125,6 +152,9 @@ def handle_opt_in_pr(
         info["error"] = f"could not build PR changes: {error}"
         console.print(f"[red]✗ {info['error']}[/red]")
         return info
+
+    if callable(pr_metrics):
+        pr_metrics = pr_metrics()
 
     # Imported here (not at module top) so tests can monkeypatch
     # evolution.core.pr_builder.PRBuilder, same as the Phase 1 opt-in step.

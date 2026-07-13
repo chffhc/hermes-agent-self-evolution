@@ -78,3 +78,27 @@ def build_run_summary(metrics) -> dict | None:
         rows.append(("Artifacts", str(metrics["output_dir"])))
 
     return {"title": title, "rows": rows, "caveat": PROXY_CAVEAT}
+
+
+def _md_cell(text: str) -> str:
+    """Escape a value for use inside a Markdown table cell."""
+    return text.replace("|", "\\|").replace("\n", " ")
+
+
+def render_markdown_summary(summary: dict) -> str:
+    """Render a build_run_summary result as a standalone Markdown document.
+
+    Stdlib-only counterpart to the PDF measured-run section: title, the
+    metric/value table, and the proxy caveat as a blockquote. Contains no
+    narrative claims beyond what the metrics artifact actually recorded.
+    """
+    lines = [
+        f"# {summary['title']}",
+        "",
+        "| Metric | Value |",
+        "| --- | --- |",
+    ]
+    for label, value in summary["rows"]:
+        lines.append(f"| {_md_cell(label)} | {_md_cell(value)} |")
+    lines += ["", f"> {summary['caveat']}", ""]
+    return "\n".join(lines)
