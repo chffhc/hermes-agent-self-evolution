@@ -769,8 +769,20 @@ def _load_skill_text(skill_name: str, skills_dir: Path | None = None) -> tuple[s
     ),
 )
 @click.option("--dry-run", is_flag=True, help="Show message counts without LLM scoring")
-def main(source, skill, output, model, max_examples, pad_with_unrelated, dry_run):
+@click.option(
+    "--max-cost-usd",
+    default=None,
+    type=click.FloatRange(min=0, min_open=True),
+    help="Hard USD budget for LLM relevance-scoring cost; the import aborts once "
+    "estimated spend exceeds it (overrides EVOLUTION_MAX_COST_USD)",
+)
+def main(source, skill, output, model, max_examples, pad_with_unrelated, dry_run, max_cost_usd):
     """Import external session data into golden eval datasets for self-evolution."""
+    from evolution.core.cost_tracker import set_budget_from_option
+
+    # Apply before any billable work — relevance scoring is LLM-backed.
+    set_budget_from_option(max_cost_usd)
+
     console.print(
         f"\n[bold cyan]External Session Importer[/bold cyan] — skill: [bold]{skill}[/bold]\n"
     )

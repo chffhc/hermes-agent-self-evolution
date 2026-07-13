@@ -1,4 +1,11 @@
-"""Generate the Phase 1 validation report as PDF."""
+"""Generate the Phase 1 validation report as PDF.
+
+The narrative numbers below document one specific historical smoke-test run
+(arxiv skill, MiniMax M2.5, keyword-overlap proxy) and are intentionally
+hardcoded as a historical record. For metrics-driven reporting of newer runs,
+read real artifacts via evolution.core.run_metrics (load_run_metrics /
+find_latest_run_metrics) instead of copying numbers into prose.
+"""
 
 from datetime import datetime
 

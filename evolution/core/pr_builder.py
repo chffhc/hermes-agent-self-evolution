@@ -241,6 +241,26 @@ class PRBuilder:
                     ["checkout", original_branch], cwd=self.hermes_agent_path, check=False
                 )
 
+    def preview_pr(
+        self,
+        changes: list[PRChange],
+        metrics: PRMetrics,
+        title_prefix: str = "evolve",
+    ) -> str:
+        """Render the redacted PR title and body without any git/GitHub side effects.
+
+        Used by --pr-dry-run flows: shows exactly what create_pr would publish
+        (same redaction rules) while guaranteeing no branch, commit, push, or PR.
+        """
+        change_names = _extract_change_names(changes)
+        diff_summary = redact_secrets(self._generate_diff_summary(changes))
+        pr_title = redact_secrets(
+            f"{title_prefix}: {' & '.join(change_names)} "
+            f"(proxy score {metrics.baseline_score:.3f} → {metrics.evolved_score:.3f})"
+        )
+        pr_body = redact_secrets(self._build_pr_body(changes, metrics, diff_summary))
+        return f"{pr_title}\n\n{pr_body}"
+
     def _generate_diff_summary(self, changes: list[PRChange]) -> str:
         """Generate a unified diff summary for all changes."""
         lines = []

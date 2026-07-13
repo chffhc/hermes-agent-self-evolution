@@ -52,11 +52,19 @@ def evolve(
     run_tests: bool = False,
     dry_run: bool = False,
     max_cost_usd: float | None = None,
+    create_pr: bool = False,
+    pr_dry_run: bool = False,
 ) -> dict | None:
     """Main evolution function — orchestrates the full optimization loop.
 
     ``max_cost_usd`` sets a hard USD budget on the global cost tracker for
     this process; ``None`` keeps the EVOLUTION_MAX_COST_USD env default.
+
+    ``create_pr``/``pr_dry_run`` are strictly opt-in: by default no PR-related
+    git operations happen at all. ``pr_dry_run`` renders the redacted PR
+    preview without touching git; ``create_pr`` invokes PRBuilder (which
+    itself enforces clean-worktree and redaction rules). Both are refused for
+    runs that failed gates or showed no positive holdout improvement.
 
     Returns the run's metrics dict (including ``improvement``, ``deployable``
     and ``output_dir``) so programmatic callers such as Phase 5 can consume
@@ -423,7 +431,120 @@ def evolve(
         )
         console.print("  Try: more iterations, better eval dataset, or different optimizer model")
 
+    # ── 11. Optional PR step (strictly opt-in; no-op by default) ────────
+    if create_pr or pr_dry_run:
+        pr_info = _handle_pr_request(
+            create_pr=create_pr,
+            pr_dry_run=pr_dry_run,
+            hermes_agent_path=config.hermes_agent_path,
+            skill_relpath=str(skill_path.relative_to(config.hermes_agent_path)),
+            baseline_text=skill["raw"],
+            evolved_text=evolved_full,
+            run_metrics=metrics,
+        )
+        preview = pr_info.pop("preview", None)
+        if preview:
+            preview_path = output_dir / "pr_preview.md"
+            preview_path.write_text(preview, encoding="utf-8")
+            pr_info["preview_path"] = str(preview_path)
+            console.print(f"  PR preview saved to {preview_path}")
+        metrics["pr"] = pr_info
+        (output_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
+
     return metrics
+
+
+def _handle_pr_request(
+    *,
+    create_pr: bool,
+    pr_dry_run: bool,
+    hermes_agent_path: Path,
+    skill_relpath: str,
+    baseline_text: str,
+    evolved_text: str,
+    run_metrics: dict,
+) -> dict:
+    """Opt-in PR step for Phase 1. Returns a JSON-serializable status dict.
+
+    Refuses to build a PR for non-deployable runs or runs without a positive
+    holdout proxy improvement — a PR must never be a way around the gates.
+    ``pr_dry_run`` wins over ``create_pr``: it returns the redacted preview
+    under the ``preview`` key without any git/GitHub side effects.
+    """
+    info: dict = {
+        "requested": True,
+        "dry_run": bool(pr_dry_run),
+        "created": False,
+        "branch_pushed": False,
+        "url": None,
+        "error": None,
+        "skipped_reason": None,
+    }
+
+    if not run_metrics.get("deployable"):
+        info["skipped_reason"] = "run is not deployable (failed constraint/test gates)"
+    elif run_metrics.get("improvement", 0.0) <= 0:
+        info["skipped_reason"] = "no positive holdout proxy improvement"
+    if info["skipped_reason"]:
+        console.print(f"[yellow]⚠ Skipping PR: {info['skipped_reason']}[/yellow]")
+        return info
+
+    from evolution.core.cost_tracker import tracker
+    from evolution.core.pr_builder import PRBuilder, PRChange, PRMetrics
+
+    changes = [
+        PRChange(
+            file_path=skill_relpath,
+            original_content=baseline_text,
+            evolved_content=evolved_text,
+            change_type="skill",
+        )
+    ]
+    baseline_score = run_metrics["baseline_score"]
+    improvement = run_metrics["improvement"]
+    pr_metrics = PRMetrics(
+        baseline_score=baseline_score,
+        evolved_score=run_metrics["evolved_score"],
+        holdout_score=run_metrics["evolved_score"],
+        improvement=improvement,
+        improvement_pct=improvement / max(0.001, baseline_score) * 100,
+        iterations=run_metrics["iterations"],
+        optimizer=f"GEPA ({run_metrics['optimizer_model']})",
+        eval_dataset_size=(
+            run_metrics["train_examples"]
+            + run_metrics["val_examples"]
+            + run_metrics["holdout_examples"]
+        ),
+        train_examples=run_metrics["train_examples"],
+        val_examples=run_metrics["val_examples"],
+        holdout_examples=run_metrics["holdout_examples"],
+        elapsed_seconds=run_metrics["elapsed_seconds"],
+        cost_estimate=f"~${tracker.total_cost_usd:.2f} (estimated)",
+    )
+
+    builder = PRBuilder(hermes_agent_path=hermes_agent_path)
+
+    if pr_dry_run:
+        console.print("\n[bold]PR dry run — no branch, commit, push, or PR created.[/bold]")
+        info["preview"] = builder.preview_pr(changes, pr_metrics)
+        return info
+
+    result = builder.create_pr(changes, pr_metrics)
+    info["created"] = result.pr_created
+    info["branch_pushed"] = result.branch_pushed
+    info["branch_name"] = result.branch_name
+    info["url"] = result.pr_url
+    info["error"] = result.error
+    if result.pr_created:
+        console.print(f"[bold green]✓ PR created: {result.pr_url}[/bold green]")
+    elif result.branch_pushed:
+        console.print(
+            f"[yellow]⚠ Branch {result.branch_name} pushed but no PR created: "
+            f"{result.error}[/yellow]"
+        )
+    else:
+        console.print(f"[red]✗ PR creation failed: {result.error}[/red]")
+    return info
 
 
 def _failed_run_metrics(skill_name: str, output_dir: str, error: str) -> dict:
@@ -459,6 +580,18 @@ def _failed_run_metrics(skill_name: str, output_dir: str, error: str) -> dict:
     help="Hard USD budget for LLM API cost; the run aborts once estimated spend "
     "exceeds it (overrides EVOLUTION_MAX_COST_USD)",
 )
+@click.option(
+    "--create-pr",
+    is_flag=True,
+    help="After a deployable improvement, create a PR against hermes-agent via "
+    "PRBuilder (requires clean worktree; never happens by default)",
+)
+@click.option(
+    "--pr-dry-run",
+    is_flag=True,
+    help="Render the redacted PR title/body/diff without any git or GitHub "
+    "side effects (takes precedence over --create-pr)",
+)
 def main(
     skill,
     iterations,
@@ -470,6 +603,8 @@ def main(
     run_tests,
     dry_run,
     max_cost_usd,
+    create_pr,
+    pr_dry_run,
 ):
     """Evolve a Hermes Agent skill using DSPy + GEPA optimization."""
     try:
@@ -484,6 +619,8 @@ def main(
             run_tests=run_tests,
             dry_run=dry_run,
             max_cost_usd=max_cost_usd,
+            create_pr=create_pr,
+            pr_dry_run=pr_dry_run,
         )
     except EvolutionError as e:
         console.print(f"[red]✗ {e}[/red]")

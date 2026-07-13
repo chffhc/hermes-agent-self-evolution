@@ -102,6 +102,34 @@ def test_phase3_cli_sets_budget_on_global_tracker(monkeypatch, global_budget_gua
     assert global_budget_guard._max_cost_usd == 3.5
 
 
+def test_session_importer_cli_sets_budget(monkeypatch, global_budget_guard):
+    from evolution.core import external_importers as mod
+
+    # --dry-run makes no LLM calls, but the budget must already be applied
+    # before main gets anywhere near billable relevance scoring.
+    monkeypatch.setattr(mod, "_load_skill_text", lambda name: ("arxiv", "skill text"))
+    for importer in (mod.ClaudeCodeImporter, mod.CopilotImporter, mod.HermesSessionImporter):
+        monkeypatch.setattr(importer, "extract_messages", staticmethod(lambda limit=0: []))
+
+    result = CliRunner().invoke(
+        mod.main, ["--skill", "arxiv", "--dry-run", "--max-cost-usd", "1.5"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert global_budget_guard._max_cost_usd == 1.5
+
+
+def test_session_importer_cli_rejects_nonpositive_budget(global_budget_guard):
+    from evolution.core import external_importers as mod
+
+    before = global_budget_guard._max_cost_usd
+
+    result = CliRunner().invoke(mod.main, ["--skill", "arxiv", "--dry-run", "--max-cost-usd", "0"])
+
+    assert result.exit_code != 0
+    assert global_budget_guard._max_cost_usd == before
+
+
 def test_continuous_evolution_cli_sets_budget(monkeypatch, global_budget_guard, capsys):
     from evolution.monitor import continuous_evolution as mod
 
