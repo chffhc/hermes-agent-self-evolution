@@ -10,6 +10,7 @@ from pathlib import Path
 
 from benchmarks.capability.batch_adapter import build_batch_runner_plan
 from benchmarks.capability.compare import compare_runs
+from benchmarks.capability.executor import BudgetConfig, build_fake_agent_invoker, run_local
 from benchmarks.capability.replay import digest_artifact, run_replay
 from benchmarks.capability.schema import RunFingerprint, SchemaError, load_run_result
 from benchmarks.capability.suite import load_suite
@@ -65,6 +66,34 @@ def build_parser() -> argparse.ArgumentParser:
     replay.add_argument("--apply-solution", action="store_true")
     replay.add_argument("--output", required=True)
 
+    run_fake = sub.add_parser(
+        "run-fake",
+        help=(
+            "end-to-end isolated-workspace run with the bundled local fake agent; "
+            "free, deterministic, and never capability evidence"
+        ),
+    )
+    run_fake.add_argument("--suite", required=True)
+    run_fake.add_argument("--role", choices=("baseline", "candidate"), required=True)
+    run_fake.add_argument("--artifact", required=True)
+    run_fake.add_argument("--artifact-digest", help="expected sha256; mismatch fails closed")
+    run_fake.add_argument("--model", required=True)
+    run_fake.add_argument("--config-json")
+    run_fake.add_argument("--seed", type=int, default=0)
+    run_fake.add_argument("--environment", required=True)
+    run_fake.add_argument(
+        "--solve", action="store_true", help="fake agent applies the checked-in replay solution"
+    )
+    run_fake.add_argument("--budget-usd", type=float, default=0.0, help="hard run budget")
+    run_fake.add_argument("--task-budget-usd", type=float, help="hard per-task budget")
+    run_fake.add_argument("--run-id")
+    run_fake.add_argument(
+        "--keep-workspaces",
+        action="store_true",
+        help="retain per-task workspaces for debugging (path recorded in notes)",
+    )
+    run_fake.add_argument("--output", required=True)
+
     compare = sub.add_parser("compare", help="compare paired baseline/candidate run files")
     compare.add_argument("--suite", required=True)
     compare.add_argument("--baseline", required=True)
@@ -110,6 +139,23 @@ def main(argv: list[str] | None = None) -> int:
                 apply_solution=args.apply_solution,
             )
             payload = result.to_dict()
+            _write_json(args.output, payload)
+        elif args.command == "run-fake":
+            fingerprint = RunFingerprint.from_config(
+                args.model, _load_config(args.config_json), args.seed, args.environment
+            )
+            outcome = run_local(
+                suite,
+                invoker=build_fake_agent_invoker(solve=args.solve),
+                run_role=args.role,
+                artifact_path=args.artifact,
+                expected_artifact_digest=args.artifact_digest,
+                fingerprint=fingerprint,
+                budget=BudgetConfig(max_run_usd=args.budget_usd, max_task_usd=args.task_budget_usd),
+                run_id=args.run_id,
+                keep_workspaces=args.keep_workspaces,
+            )
+            payload = outcome.result.to_dict()
             _write_json(args.output, payload)
         elif args.command == "compare":
             result = compare_runs(

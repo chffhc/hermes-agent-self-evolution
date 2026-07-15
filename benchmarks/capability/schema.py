@@ -14,12 +14,12 @@ import math
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from benchmarks.capability import SCHEMA_VERSION
 
-EXECUTION_MODES = frozenset({"replay", "dry_run", "live"})
+EXECUTION_MODES = frozenset({"replay", "dry_run", "fake_agent", "live"})
 RUN_ROLES = frozenset({"baseline", "candidate"})
 
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]*$")
@@ -259,6 +259,53 @@ class RunFingerprint:
 
 
 @dataclass(frozen=True)
+class UsageReport:
+    """Strict per-task cost/usage report emitted by an agent invocation.
+
+    The budget gate depends on this document, so it fails closed: unknown
+    keys, missing keys, negative or non-finite numbers, and non-integer
+    token counts are all hard errors rather than "free" tasks.
+    """
+
+    cost_usd: float
+    input_tokens: int
+    output_tokens: int
+
+    _KEYS = frozenset({"cost_usd", "input_tokens", "output_tokens"})
+
+    @classmethod
+    def from_dict(cls, obj: Any) -> UsageReport:
+        ctx = "usage report"
+        _check_keys(obj, cls._KEYS, frozenset(), ctx)
+        return cls(
+            cost_usd=_req_number(obj, "cost_usd", ctx, minimum=0.0),
+            input_tokens=_req_int(obj, "input_tokens", ctx, minimum=0),
+            output_tokens=_req_int(obj, "output_tokens", ctx, minimum=0),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "cost_usd": self.cost_usd,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+        }
+
+
+def load_usage_report(path: str | Path) -> UsageReport:
+    """Parse a usage-report JSON file, failing closed on any malformation."""
+    report_path = Path(path)
+    if report_path.is_symlink():
+        raise SchemaError(f"usage report must not be a symlink: {report_path}")
+    if not report_path.is_file():
+        raise SchemaError(f"usage report is missing or not a regular file: {report_path}")
+    try:
+        raw = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as e:
+        raise SchemaError(f"cannot read usage report {report_path}: {e}") from e
+    return UsageReport.from_dict(raw)
+
+
+@dataclass(frozen=True)
 class TaskResult:
     """Outcome of one task in one run."""
 
@@ -363,6 +410,7 @@ class RunResult:
     created_at: str
     results: tuple[TaskResult, ...]
     notes: str = ""
+    run_id: str = ""
 
     _REQUIRED = frozenset(
         {
@@ -378,7 +426,7 @@ class RunResult:
             "results",
         }
     )
-    _OPTIONAL = frozenset({"notes"})
+    _OPTIONAL = frozenset({"notes", "run_id"})
 
     @classmethod
     def from_dict(cls, obj: Any) -> RunResult:
@@ -403,7 +451,8 @@ class RunResult:
         if evidence and mode != "live":
             raise SchemaError(
                 f"{ctx}: capability_evidence=true is only valid for execution_mode='live' "
-                f"(got {mode!r}) — fixture/replay/dry-run output is never capability evidence"
+                f"(got {mode!r}) — fixture/replay/fake-agent/dry-run output is never "
+                "capability evidence"
             )
         suite_hash = _req_str(obj, "suite_hash", ctx)
         if not _HEX_DIGEST_RE.match(suite_hash):
@@ -430,6 +479,11 @@ class RunResult:
         notes = obj.get("notes", "")
         if not isinstance(notes, str):
             raise SchemaError(f"{ctx}: 'notes' must be a string")
+        run_id = obj.get("run_id", "")
+        if run_id and (not isinstance(run_id, str) or not _SLUG_RE.match(run_id)):
+            raise SchemaError(f"{ctx}: 'run_id' must match {_SLUG_RE.pattern}, got {run_id!r}")
+        if not isinstance(run_id, str):
+            raise SchemaError(f"{ctx}: 'run_id' must be a string")
         return cls(
             schema_version=version,
             suite_id=_req_str(obj, "suite_id", ctx, slug=True),
@@ -442,6 +496,7 @@ class RunResult:
             created_at=created_at,
             results=results,
             notes=notes,
+            run_id=run_id,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -459,6 +514,8 @@ class RunResult:
         }
         if self.notes:
             d["notes"] = self.notes
+        if self.run_id:
+            d["run_id"] = self.run_id
         return d
 
     @property
