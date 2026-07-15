@@ -118,3 +118,123 @@ def test_default_markdown_output_path(tmp_path, monkeypatch):
 
     assert result == "reports/measured_run_summary.md"
     assert (tmp_path / "reports" / "measured_run_summary.md").is_file()
+
+
+# ── Manifest sidecar ────────────────────────────────────────────────────
+
+
+def test_markdown_report_writes_manifest_sidecar(tmp_path):
+    import hashlib
+
+    metrics_path = _write_metrics(tmp_path, _metrics())
+    output_path = tmp_path / "run.md"
+
+    generate_report.main(
+        ["--format", "markdown", "--metrics", metrics_path, "--output", str(output_path)]
+    )
+
+    manifest_path = tmp_path / "run.md.manifest.json"
+    assert manifest_path.is_file()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    assert manifest["schema"] == generate_report.MANIFEST_SCHEMA
+    assert manifest["format"] == "markdown"
+    assert manifest["report_kind"] == "measured_run_summary"
+    assert manifest["contains_hardcoded_historical_narrative"] is False
+    assert manifest["source_metrics_path"] == metrics_path
+    # The checksum ties the manifest to the exact report content.
+    report_bytes = output_path.read_bytes()
+    assert manifest["report_sha256"] == hashlib.sha256(report_bytes).hexdigest()
+
+    # Measured numbers in the manifest come only from the real metrics.
+    rows = dict(tuple(row) for row in manifest["measured_run"]["rows"])
+    assert rows["Baseline score (proxy)"] == "0.408"
+    assert rows["Evolved score (proxy)"] == "0.569"
+    assert "not validated production benchmarks" in manifest["measured_run"]["caveat"]
+
+
+def test_refused_metrics_leave_no_manifest(tmp_path):
+    metrics_path = _write_metrics(
+        tmp_path, {"skill_name": "arxiv", "deployable": False, "improvement": 0.0}
+    )
+    output_path = tmp_path / "run.md"
+
+    with pytest.raises(ValueError, match="baseline/evolved score pair"):
+        generate_report.main(
+            ["--format", "markdown", "--metrics", metrics_path, "--output", str(output_path)]
+        )
+
+    assert not output_path.exists()
+    assert not (tmp_path / "run.md.manifest.json").exists()
+
+
+def test_manifest_write_failure_removes_report(tmp_path, monkeypatch):
+    metrics_path = _write_metrics(tmp_path, _metrics())
+    output_path = tmp_path / "run.md"
+
+    real_write_atomic = generate_report._write_atomic
+    calls = []
+
+    def flaky_write_atomic(path, content):
+        calls.append(path)
+        if len(calls) == 2:  # second write is the manifest sidecar
+            raise OSError("disk full")
+        real_write_atomic(path, content)
+
+    monkeypatch.setattr(generate_report, "_write_atomic", flaky_write_atomic)
+
+    with pytest.raises(OSError, match="disk full"):
+        generate_report.main(
+            ["--format", "markdown", "--metrics", metrics_path, "--output", str(output_path)]
+        )
+
+    # No partial output: the already-written report was rolled back.
+    assert not output_path.exists()
+    assert not (tmp_path / "run.md.manifest.json").exists()
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_manifest_write_failure_restores_existing_report_pair(tmp_path, monkeypatch):
+    metrics_path = _write_metrics(tmp_path, _metrics())
+    output_path = tmp_path / "run.md"
+    manifest_path = tmp_path / "run.md.manifest.json"
+    output_path.write_text("old report\n", encoding="utf-8")
+    manifest_path.write_text('{"old": true}\n', encoding="utf-8")
+
+    real_write_atomic = generate_report._write_atomic
+    calls = []
+
+    def flaky_write_atomic(path, content):
+        calls.append(path)
+        if len(calls) == 2:
+            raise OSError("disk full")
+        real_write_atomic(path, content)
+
+    monkeypatch.setattr(generate_report, "_write_atomic", flaky_write_atomic)
+
+    with pytest.raises(OSError, match="disk full"):
+        generate_report.main(
+            ["--format", "markdown", "--metrics", metrics_path, "--output", str(output_path)]
+        )
+
+    assert output_path.read_text(encoding="utf-8") == "old report\n"
+    assert manifest_path.read_text(encoding="utf-8") == '{"old": true}\n'
+
+
+def test_report_write_failure_leaves_no_temp_files(tmp_path, monkeypatch):
+    metrics_path = _write_metrics(tmp_path, _metrics())
+    output_path = tmp_path / "run.md"
+
+    def broken_replace(src, dst):
+        raise OSError("rename failed")
+
+    monkeypatch.setattr(generate_report.os, "replace", broken_replace)
+
+    with pytest.raises(OSError, match="rename failed"):
+        generate_report.main(
+            ["--format", "markdown", "--metrics", metrics_path, "--output", str(output_path)]
+        )
+
+    assert not output_path.exists()
+    assert not (tmp_path / "run.md.manifest.json").exists()
+    assert not list(tmp_path.glob(".run.md.*.tmp"))

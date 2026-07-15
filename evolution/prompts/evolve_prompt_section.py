@@ -19,6 +19,7 @@ Usage:
     python -m evolution.prompts.evolve_prompt_section --section ALL --iterations 10
 """
 
+import ast
 import json
 import time
 from dataclasses import dataclass, field
@@ -160,7 +161,9 @@ def extract_prompt_sections(
 ) -> list[PromptSection]:
     """Extract prompt section content from hermes-agent source files.
 
-    Parses Python source files to find string constant definitions.
+    Parses Python source files (AST-based) to find string constant
+    definitions; the decoded value is preserved exactly so it round-trips
+    through evolution.core.source_patch.
     """
     sections = []
     target_names = section_names or list(PROMPT_SECTIONS.keys())
@@ -177,8 +180,8 @@ def extract_prompt_sections(
             console.print(f"[red]✗ File not found: {file_path}[/red]")
             continue
 
-        content = _extract_constant(file_path, name)
-        if content:
+        content, error = _extract_constant(file_path, name)
+        if content is not None:
             sections.append(
                 PromptSection(
                     name=name,
@@ -189,46 +192,70 @@ def extract_prompt_sections(
                     risk_level=info["risk_level"],
                 )
             )
-            console.print(f"  ✓ {name}: {len(content)} chars — {content[:60]}...")
+            console.print(f"  ✓ {name}: {len(content)} chars — {content.strip()[:60]}...")
         else:
-            console.print(f"  [red]✗ Could not extract {name}[/red]")
+            console.print(f"  [red]✗ Could not extract {name}: {error}[/red]")
 
     return sections
 
 
-def _extract_constant(file_path: Path, name: str) -> str | None:
-    """Extract a Python string constant from source code.
+def _extract_constant(file_path: Path, name: str) -> tuple[str | None, str | None]:
+    """Extract the decoded value of a module string constant via the AST.
 
-    Handles multi-line string definitions (parenthesized tuples of strings).
+    Supports plain string constants — single-, triple-quoted, and implicit
+    adjacent-literal concatenation (which Python folds into one constant at
+    parse time). The decoded value is returned exactly as Python sees it,
+    including whitespace/newline framing, so the same constant can later be
+    located and patched by evolution.core.source_patch without any lossy
+    re-encoding.
+
+    Fails closed with ``(None, reason)`` on unreadable files, syntax errors,
+    f-strings, computed expressions (``+`` concatenation, calls, names), and
+    duplicate or non-assignment bindings of ``name``.
     """
     try:
-        source = file_path.read_text()
-    except Exception:
-        return None
+        source = file_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        return None, f"cannot read file: {e}"
+    try:
+        tree = ast.parse(source)
+    except SyntaxError as e:
+        return None, f"source does not parse as Python: {e}"
 
-    # Find the constant definition
-    import re
+    # Count *every* binding of the name (assignments, loop/with targets,
+    # tuple unpacking, augmented assignment, ...): more than one means the
+    # constant's effective value is ambiguous, so refuse rather than guess.
+    bindings = sum(
+        1
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store) and node.id == name
+    )
+    if bindings == 0:
+        return None, f"no assignment to {name} found"
+    if bindings > 1:
+        return None, f"{name} is bound {bindings} times; ambiguous"
 
-    # Pattern: NAME = (\n    "..." \n    "..." \n)
-    # or: NAME = "..."
-    safe_name = re.escape(name)
-    pattern = rf"^{safe_name}\s*=\s*\(([\s\S]*?)\)\s*$"
-    match = re.search(pattern, source, re.MULTILINE)
+    value_node = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            if any(isinstance(t, ast.Name) and t.id == name for t in node.targets):
+                value_node = node.value
+        elif isinstance(node, ast.AnnAssign):
+            if isinstance(node.target, ast.Name) and node.target.id == name:
+                value_node = node.value
+    if value_node is None:
+        return None, f"{name} is not bound by a simple assignment"
 
-    if match:
-        # Extract string contents from parenthesized block
-        inner = match.group(1)
-        # Join multi-line string literals
-        parts = re.findall(r'["\']([^"\']*)["\']', inner)
-        return "\n".join(p for p in parts if p.strip())
-
-    # Try simple string: NAME = "..."
-    pattern2 = rf'^{safe_name}\s*=\s*"""([\s\S]*?)"""'
-    match2 = re.search(pattern2, source, re.MULTILINE)
-    if match2:
-        return match2.group(1).strip()
-
-    return None
+    if isinstance(value_node, ast.JoinedStr):
+        return None, f"{name} is an f-string; refusing lossy extraction"
+    if not (isinstance(value_node, ast.Constant) and isinstance(value_node.value, str)):
+        return None, (
+            f"{name} is not a plain string constant "
+            f"(got {type(value_node).__name__}); refusing to extract"
+        )
+    if not value_node.value.strip():
+        return None, f"{name} is empty or whitespace-only"
+    return value_node.value, None
 
 
 # ── Behavioral test generator ───────────────────────────────────────────
@@ -476,7 +503,22 @@ class PromptSectionModule(dspy.Module):
                         f"Cannot find prompt section sentinels for {name}. "
                         f"Instruction preview: {instruction[:300]}"
                     )
-                content = instruction[start_idx + len(_SECTION_SENTINEL_START) : end_idx].strip()
+                evolved_text = instruction[
+                    start_idx + len(_SECTION_SENTINEL_START) : end_idx
+                ].strip()
+                # Re-attach the baseline's whitespace framing (e.g. the
+                # newlines inside a '"""\n...\n"""' literal): the embed adds
+                # its own newlines around the sentinels, so stripping is
+                # needed, but an unchanged section must round-trip to content
+                # byte-identical to its baseline or every no-op run would
+                # look like a whitespace-only change.
+                original_content = original.content
+                prefix = original_content[: len(original_content) - len(original_content.lstrip())]
+                suffix_len = len(original_content) - len(original_content.rstrip())
+                suffix = (
+                    original_content[len(original_content) - suffix_len :] if suffix_len else ""
+                )
+                content = prefix + evolved_text + suffix
 
             evolved.append(
                 PromptSection(
@@ -598,9 +640,10 @@ def evolve_prompt_section(
     preview without touching git; ``create_pr`` invokes PRBuilder (which
     itself enforces clean-worktree and redaction rules). Both are refused for
     runs that failed constraint gates or showed no behavioral improvement, and
-    for sections whose baseline text cannot be located verbatim in their
-    source files (prompt sections are Python constants, so extraction is
-    lossy for multi-part string literals — refusing is the safe default).
+    for sections whose baseline text cannot be located in their source files —
+    verbatim or via the fail-closed AST string-constant patcher. Extraction is
+    AST-based and preserves decoded values exactly, so an unlocatable baseline
+    means the source changed underneath the run; refusing is the safe default.
     """
 
     hermes_agent_path = resolve_hermes_agent_path(hermes_repo)
@@ -802,9 +845,10 @@ def _handle_pr_request(
     """Opt-in PR step for Phase 3. Returns a JSON-serializable status dict.
 
     Changed sections are proposed as exact-snippet replacements in their
-    hermes-agent source files; any section whose baseline content cannot be
-    located verbatim (or matches ambiguously) refuses the whole PR rather
-    than guessing.
+    hermes-agent source files (with the AST string-constant patcher as the
+    fallback for literals spelled with escape sequences); any section whose
+    baseline content cannot be located, or matches ambiguously, refuses the
+    whole PR rather than guessing.
     """
     from evolution.core.cost_tracker import tracker
     from evolution.core.pr_builder import PRMetrics

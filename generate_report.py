@@ -10,20 +10,114 @@ fail closed on missing/malformed data).
 --format markdown writes a stdlib-only measured-run summary instead of the
 PDF; it requires --metrics because it contains nothing but the measured run.
 
+Every report is written together with a ``<report>.manifest.json`` sidecar
+that machine-readably separates measured-run data (sourced only from the real
+metrics artifact) from the hardcoded historical narrative, and records the
+report's sha256. Writes are atomic (temp file + rename) and cleaned up on
+failure, so a failed run never leaves a partial report or an orphaned
+manifest behind.
+
 reportlab is imported lazily inside build_report so the summary logic stays
 importable/testable in environments without reportlab installed.
 """
 
-from datetime import datetime
+import hashlib
+import json
+import os
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
 
 from evolution.core.report_summary import build_run_summary, render_markdown_summary
+
+MANIFEST_SCHEMA = "hermes-evolution-report-manifest/v1"
+
+
+def manifest_path_for(report_path: str) -> str:
+    """Sidecar manifest path for a report output path."""
+    return f"{report_path}.manifest.json"
+
+
+def _build_manifest(
+    *,
+    report_format: str,
+    report_kind: str,
+    contains_historical_narrative: bool,
+    report_sha256: str,
+    run_summary: dict | None,
+    metrics_source: str | None,
+) -> dict:
+    """Structured report metadata; measured numbers come only from run_summary.
+
+    ``run_summary`` is a build_run_summary result (fail-closed from a real
+    metrics artifact) or None when the report contains no measured run.
+    """
+    measured = None
+    if run_summary is not None:
+        measured = {
+            "title": run_summary["title"],
+            "rows": [list(row) for row in run_summary["rows"]],
+            "caveat": run_summary["caveat"],
+        }
+    return {
+        "schema": MANIFEST_SCHEMA,
+        "format": report_format,
+        "report_kind": report_kind,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "report_sha256": report_sha256,
+        "source_metrics_path": metrics_source,
+        "contains_hardcoded_historical_narrative": contains_historical_narrative,
+        "measured_run": measured,
+    }
+
+
+def _write_atomic(path: Path, content: str) -> None:
+    """Write text via a temp file in the same directory + atomic rename."""
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
+def _snapshot(path: Path) -> bytes | None:
+    """Capture an existing artifact so a failed pair update can restore it."""
+    return path.read_bytes() if path.exists() else None
+
+
+def _restore_snapshot(path: Path, content: bytes | None) -> None:
+    """Best-effort rollback for a report/manifest transaction."""
+    if content is None:
+        path.unlink(missing_ok=True)
+    else:
+        path.write_bytes(content)
+
+
+def _write_report_and_manifest(output: Path, report_text: str, manifest: dict) -> None:
+    """Write report + manifest together and restore prior artifacts on failure."""
+    manifest_file = Path(manifest_path_for(str(output)))
+    previous_report = _snapshot(output)
+    previous_manifest = _snapshot(manifest_file)
+    try:
+        _write_atomic(output, report_text)
+        _write_atomic(manifest_file, json.dumps(manifest, indent=2) + "\n")
+    except BaseException:
+        _restore_snapshot(output, previous_report)
+        _restore_snapshot(manifest_file, previous_manifest)
+        raise
 
 
 def build_report(
     output_path: str = "reports/phase1_validation_report.pdf",
     run_metrics: dict | None = None,
+    metrics_source: str | None = None,
 ):
-    import os
 
     from reportlab.lib.colors import HexColor, white
     from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY
@@ -49,10 +143,17 @@ def build_report(
                 "refusing to render a measured-run section from them"
             )
 
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+
+    # Build into a temp file so a failed build never leaves a partial PDF.
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(output.parent), prefix=f".{output.name}.", suffix=".tmp"
+    )
+    os.close(fd)
 
     doc = SimpleDocTemplate(
-        output_path,
+        tmp_name,
         pagesize=letter,
         topMargin=0.75 * inch,
         bottomMargin=0.75 * inch,
@@ -668,20 +769,51 @@ def build_report(
     )
     story.append(Paragraph("github.com/NousResearch/hermes-agent-self-evolution", styles["Footer"]))
 
-    doc.build(story)
+    try:
+        doc.build(story)
+    except BaseException:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
+
+    report_sha256 = hashlib.sha256(Path(tmp_name).read_bytes()).hexdigest()
+    manifest = _build_manifest(
+        report_format="pdf",
+        report_kind="phase1_validation_report",
+        contains_historical_narrative=True,
+        report_sha256=report_sha256,
+        run_summary=run_summary,
+        metrics_source=metrics_source,
+    )
+    manifest_path = Path(manifest_path_for(output_path))
+    previous_report = _snapshot(output)
+    previous_manifest = _snapshot(manifest_path)
+    try:
+        os.replace(tmp_name, output_path)
+    except BaseException:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
+    try:
+        _write_atomic(manifest_path, json.dumps(manifest, indent=2) + "\n")
+    except BaseException:
+        # Never leave a new report paired with a stale/missing manifest, and
+        # do not destroy a previously valid pair when an update fails.
+        _restore_snapshot(output, previous_report)
+        _restore_snapshot(manifest_path, previous_manifest)
+        raise
     return output_path
 
 
-def build_markdown_report(output_path: str, run_metrics: dict) -> str:
+def build_markdown_report(
+    output_path: str, run_metrics: dict, metrics_source: str | None = None
+) -> str:
     """Write a stdlib-only Markdown summary of one measured run.
 
     Unlike the PDF, this contains no historical narrative — only the
     measured-run table and the proxy caveat, so it can never restate the
     hardcoded smoke-test claims alongside newer numbers. Raises ValueError
-    when the metrics lack a usable baseline/evolved score pair.
+    when the metrics lack a usable baseline/evolved score pair; nothing is
+    written unless both the report and its manifest sidecar succeed.
     """
-    from pathlib import Path
-
     run_summary = build_run_summary(run_metrics)
     if run_summary is None:
         raise ValueError(
@@ -689,15 +821,24 @@ def build_markdown_report(output_path: str, run_metrics: dict) -> str:
             "refusing to render a measured-run summary from them"
         )
 
+    report_text = render_markdown_summary(run_summary)
+    manifest = _build_manifest(
+        report_format="markdown",
+        report_kind="measured_run_summary",
+        contains_historical_narrative=False,
+        report_sha256=hashlib.sha256(report_text.encode("utf-8")).hexdigest(),
+        run_summary=run_summary,
+        metrics_source=metrics_source,
+    )
+
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(render_markdown_summary(run_summary), encoding="utf-8")
+    _write_report_and_manifest(output, report_text, manifest)
     return str(output)
 
 
 def main(argv: list[str] | None = None) -> str:
     import argparse
-    from pathlib import Path
 
     parser = argparse.ArgumentParser(
         description="Generate the Phase 1 validation report. By default this is "
@@ -740,10 +881,16 @@ def main(argv: list[str] | None = None) -> str:
                 "--format markdown requires --metrics: the markdown report contains "
                 "only the measured-run summary"
             )
-        path = build_markdown_report(args.output or "reports/measured_run_summary.md", run_metrics)
+        path = build_markdown_report(
+            args.output or "reports/measured_run_summary.md",
+            run_metrics,
+            metrics_source=args.metrics,
+        )
     else:
         path = build_report(
-            args.output or "reports/phase1_validation_report.pdf", run_metrics=run_metrics
+            args.output or "reports/phase1_validation_report.pdf",
+            run_metrics=run_metrics,
+            metrics_source=args.metrics,
         )
     print(f"Report generated: {path}")
     return path
