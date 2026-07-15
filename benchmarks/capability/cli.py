@@ -1,0 +1,142 @@
+"""CLI for validating and exercising the capability benchmark foundation."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import tempfile
+from pathlib import Path
+
+from benchmarks.capability.batch_adapter import build_batch_runner_plan
+from benchmarks.capability.compare import compare_runs
+from benchmarks.capability.replay import digest_artifact, run_replay
+from benchmarks.capability.schema import RunFingerprint, SchemaError, load_run_result
+from benchmarks.capability.suite import load_suite
+
+
+def _write_json(path: str | Path, payload: dict[str, object]) -> None:
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(
+        prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, sort_keys=True, ensure_ascii=False)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, destination)
+    except BaseException:
+        Path(temp_name).unlink(missing_ok=True)
+        raise
+
+
+def _load_config(path: str | None) -> dict[str, object]:
+    if path is None:
+        return {}
+    try:
+        value = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SchemaError(f"cannot load config JSON {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise SchemaError("config JSON must contain an object")
+    return value
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="capability-bench")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    validate = sub.add_parser("validate", help="validate a suite and all verifier fixtures")
+    validate.add_argument("--suite", required=True)
+
+    replay = sub.add_parser(
+        "replay", help="exercise deterministic fixtures; never capability evidence"
+    )
+    replay.add_argument("--suite", required=True)
+    replay.add_argument("--role", choices=("baseline", "candidate"), required=True)
+    replay.add_argument("--artifact", required=True)
+    replay.add_argument("--model", required=True)
+    replay.add_argument("--config-json")
+    replay.add_argument("--seed", type=int, default=0)
+    replay.add_argument("--environment", required=True)
+    replay.add_argument("--apply-solution", action="store_true")
+    replay.add_argument("--output", required=True)
+
+    compare = sub.add_parser("compare", help="compare paired baseline/candidate run files")
+    compare.add_argument("--suite", required=True)
+    compare.add_argument("--baseline", required=True)
+    compare.add_argument("--candidate", required=True)
+    compare.add_argument("--output")
+
+    plan = sub.add_parser(
+        "plan-batch", help="build a non-executable Hermes batch_runner dry-run plan"
+    )
+    plan.add_argument("--suite", required=True)
+    plan.add_argument("--hermes-repo", required=True)
+    plan.add_argument("--dataset", required=True)
+    plan.add_argument("--model", required=True)
+    plan.add_argument("--run-name", required=True)
+    plan.add_argument("--max-turns", type=int, default=20)
+    plan.add_argument("--batch-size", type=int, default=1)
+    plan.add_argument("--num-workers", type=int, default=1)
+    plan.add_argument("--output")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    try:
+        suite = load_suite(args.suite)
+        if args.command == "validate":
+            payload: dict[str, object] = {
+                "valid": True,
+                "suite_id": suite.suite_id,
+                "suite_hash": suite.suite_hash,
+                "task_count": len(suite.tasks),
+                "capability_evidence": False,
+            }
+        elif args.command == "replay":
+            fingerprint = RunFingerprint.from_config(
+                args.model, _load_config(args.config_json), args.seed, args.environment
+            )
+            result = run_replay(
+                suite,
+                run_role=args.role,
+                artifact_digest=digest_artifact(args.artifact),
+                fingerprint=fingerprint,
+                apply_solution=args.apply_solution,
+            )
+            payload = result.to_dict()
+            _write_json(args.output, payload)
+        elif args.command == "compare":
+            result = compare_runs(
+                suite, load_run_result(args.baseline), load_run_result(args.candidate)
+            )
+            payload = result.to_dict()
+            if args.output:
+                _write_json(args.output, payload)
+        else:
+            payload = build_batch_runner_plan(
+                suite,
+                hermes_repo=args.hermes_repo,
+                dataset_path=args.dataset,
+                model=args.model,
+                run_name=args.run_name,
+                max_turns=args.max_turns,
+                batch_size=args.batch_size,
+                num_workers=args.num_workers,
+            )
+            if args.output:
+                _write_json(args.output, payload)
+        print(json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False))
+        return 0
+    except SchemaError as exc:
+        print(json.dumps({"error": str(exc), "valid": False}, ensure_ascii=False))
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

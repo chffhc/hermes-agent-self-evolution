@@ -1,0 +1,6 @@
+{
+  "items": [
+    {"name": "modem", "units": 2},
+    {"name": "cable", "units": 3}
+  ]
+}

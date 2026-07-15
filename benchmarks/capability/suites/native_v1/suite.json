@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "suite_id": "hermes-native-v1",
+  "description": "Small deterministic harness-validation suite. Replay results are not agent capability evidence.",
+  "tasks": [
+    {
+      "task_id": "edit-release-note",
+      "category": "file-editing",
+      "prompt": "Replace the placeholder in release.txt with exactly: release=ready, preserving the final newline.",
+      "fixture": "tasks/edit-release-note",
+      "verifiers": [
+        {"type": "file_exact", "params": {"path": "release.txt", "expected_file": "expected/release.txt"}}
+      ],
+      "timeout_seconds": 10,
+      "critical": false
+    },
+    {
+      "task_id": "transform-inventory-json",
+      "category": "data-transformation",
+      "prompt": "Read inventory.json and write summary.json with total_units=5 and names sorted alphabetically.",
+      "fixture": "tasks/transform-inventory-json",
+      "verifiers": [
+        {"type": "json_subset", "params": {"path": "summary.json", "expected": {"total_units": 5, "names": ["cable", "modem"]}}}
+      ],
+      "timeout_seconds": 10,
+      "critical": false
+    },
+    {
+      "task_id": "repair-calculator",
+      "category": "code-repair",
+      "prompt": "Fix calculator.py so the supplied tests pass. Do not modify test_calculator.py.",
+      "fixture": "tasks/repair-calculator",
+      "verifiers": [
+        {"type": "command_exit", "params": {"argv": ["python", "test_calculator.py"], "expected_exit": 0}},
+        {"type": "protected_unchanged", "params": {"paths": ["test_calculator.py"]}}
+      ],
+      "timeout_seconds": 20,
+      "critical": true
+    }
+  ]
+}
