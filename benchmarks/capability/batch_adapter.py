@@ -1,4 +1,12 @@
-"""Read-only dry-run seam to the current Hermes ``batch_runner.py``."""
+"""Read-only dry-run seam to the current Hermes ``batch_runner.py``.
+
+Superseded as the live-integration path: ``batch_runner.py`` targets bulk
+trajectory generation, not isolated per-task workspaces or per-session cost
+attribution. The concrete current-Hermes seam is the single-query CLI
+contract in :mod:`benchmarks.capability.hermes_adapter` (``probe-hermes`` /
+``run-hermes-stub`` / ``run-hermes-live``). This plan builder is kept only
+as documentation of the rejected alternative and stays non-executable.
+"""
 
 from __future__ import annotations
 
@@ -70,7 +78,11 @@ def build_batch_runner_plan(
             "baseline/candidate artifact injection",
             "trajectory-to-workspace/result attribution",
             "post-run deterministic verifier invocation",
-            "cost extraction and hard budget enforcement",
+            "cost extraction and pre-spend budget enforcement",
         ],
         "note": "Command shape only. Do not execute as capability evaluation yet.",
+        "superseded_by": (
+            "hermes_adapter single-query CLI seam (probe-hermes / run-hermes-stub / "
+            "run-hermes-live)"
+        ),
     }

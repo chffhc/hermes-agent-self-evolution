@@ -11,6 +11,12 @@ from pathlib import Path
 from benchmarks.capability.batch_adapter import build_batch_runner_plan
 from benchmarks.capability.compare import compare_runs
 from benchmarks.capability.executor import BudgetConfig, build_fake_agent_invoker, run_local
+from benchmarks.capability.hermes_adapter import (
+    LiveExecutionApproval,
+    build_live_hermes_invoker,
+    build_stub_hermes_invoker,
+    probe_hermes_checkout,
+)
 from benchmarks.capability.replay import digest_artifact, run_replay
 from benchmarks.capability.schema import RunFingerprint, SchemaError, load_run_result
 from benchmarks.capability.suite import load_suite
@@ -84,8 +90,10 @@ def build_parser() -> argparse.ArgumentParser:
     run_fake.add_argument(
         "--solve", action="store_true", help="fake agent applies the checked-in replay solution"
     )
-    run_fake.add_argument("--budget-usd", type=float, default=0.0, help="hard run budget")
-    run_fake.add_argument("--task-budget-usd", type=float, help="hard per-task budget")
+    run_fake.add_argument(
+        "--budget-usd", type=float, default=0.0, help="post-run accounting ceiling"
+    )
+    run_fake.add_argument("--task-budget-usd", type=float, help="per-task accounting ceiling")
     run_fake.add_argument("--run-id")
     run_fake.add_argument(
         "--keep-workspaces",
@@ -93,6 +101,83 @@ def build_parser() -> argparse.ArgumentParser:
         help="retain per-task workspaces for debugging (path recorded in notes)",
     )
     run_fake.add_argument("--output", required=True)
+
+    probe = sub.add_parser(
+        "probe-hermes",
+        help=(
+            "fail-closed compatibility probe of a current-Hermes checkout; reports the "
+            "exact seam invariants and blockers, never executes Hermes"
+        ),
+    )
+    probe.add_argument("--hermes-repo", required=True)
+    probe.add_argument("--output")
+
+    def _add_hermes_run_args(cmd: argparse.ArgumentParser) -> None:
+        cmd.add_argument("--suite", required=True)
+        cmd.add_argument("--role", choices=("baseline", "candidate"), required=True)
+        cmd.add_argument(
+            "--artifact",
+            required=True,
+            help="skill directory containing SKILL.md (only live track)",
+        )
+        cmd.add_argument("--artifact-digest", help="expected sha256; mismatch fails closed")
+        cmd.add_argument("--model", required=True)
+        cmd.add_argument("--max-turns", type=int, default=20)
+        cmd.add_argument("--seed", type=int, default=0)
+        cmd.add_argument("--environment", required=True)
+        cmd.add_argument("--run-id")
+        cmd.add_argument("--keep-workspaces", action="store_true")
+        cmd.add_argument("--output", required=True)
+
+    run_stub = sub.add_parser(
+        "run-hermes-stub",
+        help=(
+            "end-to-end run against the bundled current-Hermes CLI contract emulator; "
+            "free, local, and never capability evidence"
+        ),
+    )
+    _add_hermes_run_args(run_stub)
+    run_stub.add_argument(
+        "--solve", action="store_true", help="stub applies the checked-in replay solution"
+    )
+    run_stub.add_argument(
+        "--budget-usd", type=float, default=0.0, help="post-run accounting ceiling"
+    )
+    run_stub.add_argument("--task-budget-usd", type=float, help="per-task accounting ceiling")
+
+    run_live = sub.add_parser(
+        "run-hermes-live",
+        help=(
+            "reserved REAL current-Hermes invocation contract. Intentionally blocked "
+            "before launch until probe-hermes reports pre-spend USD enforcement and "
+            "filesystem confinement; confirmation cannot bypass those blockers."
+        ),
+    )
+    _add_hermes_run_args(run_live)
+    run_live.add_argument("--hermes-repo", required=True)
+    run_live.add_argument(
+        "--confirm-live-spend",
+        required=True,
+        help="must be the exact confirmation phrase printed by a wrong attempt",
+    )
+    run_live.add_argument(
+        "--budget-usd", type=float, required=True, help="run accounting ceiling (> 0)"
+    )
+    run_live.add_argument(
+        "--task-budget-usd",
+        type=float,
+        required=True,
+        help="per-task accounting ceiling (> 0)",
+    )
+    run_live.add_argument("--provider")
+    run_live.add_argument(
+        "--allow-env",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="environment variable NAME passed through to Hermes (e.g. an API key); "
+        "values are never recorded",
+    )
 
     compare = sub.add_parser("compare", help="compare paired baseline/candidate run files")
     compare.add_argument("--suite", required=True)
@@ -118,6 +203,13 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        if args.command == "probe-hermes":
+            report = probe_hermes_checkout(args.hermes_repo)
+            payload = report.to_dict()
+            if args.output:
+                _write_json(args.output, payload)
+            print(json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False))
+            return 0 if report.compatible else 2
         suite = load_suite(args.suite)
         if args.command == "validate":
             payload: dict[str, object] = {
@@ -154,6 +246,61 @@ def main(argv: list[str] | None = None) -> int:
                 budget=BudgetConfig(max_run_usd=args.budget_usd, max_task_usd=args.task_budget_usd),
                 run_id=args.run_id,
                 keep_workspaces=args.keep_workspaces,
+            )
+            payload = outcome.result.to_dict()
+            _write_json(args.output, payload)
+        elif args.command == "run-hermes-stub":
+            invoker = build_stub_hermes_invoker(
+                args.artifact,
+                solve=args.solve,
+                expected_model=args.model,
+                max_turns=args.max_turns,
+            )
+            fingerprint = RunFingerprint.from_config(
+                args.model, invoker.fingerprint_config(), args.seed, args.environment
+            )
+            outcome = run_local(
+                suite,
+                invoker=invoker,
+                run_role=args.role,
+                artifact_path=args.artifact,
+                expected_artifact_digest=args.artifact_digest,
+                fingerprint=fingerprint,
+                budget=BudgetConfig(max_run_usd=args.budget_usd, max_task_usd=args.task_budget_usd),
+                run_id=args.run_id,
+                keep_workspaces=args.keep_workspaces,
+            )
+            payload = outcome.result.to_dict()
+            _write_json(args.output, payload)
+        elif args.command == "run-hermes-live":
+            approval = LiveExecutionApproval(
+                confirm=args.confirm_live_spend,
+                max_run_usd=args.budget_usd,
+                max_task_usd=args.task_budget_usd,
+                env_passthrough=tuple(args.allow_env),
+            )
+            invoker = build_live_hermes_invoker(
+                args.artifact,
+                checkout=args.hermes_repo,
+                approval=approval,
+                model=args.model,
+                provider=args.provider,
+                max_turns=args.max_turns,
+            )
+            fingerprint = RunFingerprint.from_config(
+                args.model, invoker.fingerprint_config(), args.seed, args.environment
+            )
+            outcome = run_local(
+                suite,
+                invoker=invoker,
+                run_role=args.role,
+                artifact_path=args.artifact,
+                expected_artifact_digest=args.artifact_digest,
+                fingerprint=fingerprint,
+                budget=BudgetConfig(max_run_usd=args.budget_usd, max_task_usd=args.task_budget_usd),
+                run_id=args.run_id,
+                keep_workspaces=args.keep_workspaces,
+                live_approval=approval,
             )
             payload = outcome.result.to_dict()
             _write_json(args.output, payload)

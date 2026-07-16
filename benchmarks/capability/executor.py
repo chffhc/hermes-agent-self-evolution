@@ -3,15 +3,18 @@
 For every task this executor creates a disposable per-run/per-task workspace,
 injects exactly one digest-bound baseline or candidate artifact, invokes an
 agent through an injectable argv/callable seam (never ``shell=True``), parses
-a strict per-task usage report against a hard USD budget, and then runs the
+a strict per-task usage report against a post-run accounting ceiling, and then runs the
 task's deterministic verifiers against the final workspace state.
 
-Only the ``fake_agent`` execution mode is implemented. Its output validates
-the harness, not an agent, so every run emitted here is permanently
-``capability_evidence=False``. A future live Hermes adapter must plug into the
-same :class:`AgentInvoker` seam and satisfy explicit prerequisites (real agent
-binary, real usage extraction, hard budget) before any run may ever be
-labeled live evidence.
+Two free local execution modes run by default: ``fake_agent`` (bundled
+scripted agent) and ``hermes_cli_stub`` (bundled emulator of the current
+Hermes single-query CLI contract; see
+:mod:`benchmarks.capability.hermes_adapter`). Both validate the harness, not
+an agent, so their runs are permanently ``capability_evidence=False``.
+``execution_mode="live"`` is reserved for an attested adapter, but current
+Hermes live construction is blocked before launch because it lacks both a
+pre-spend USD ceiling and filesystem confinement (see
+docs/CAPABILITY_BENCHMARK.md).
 
 Error philosophy: harness misconfiguration (bad artifact, unsafe destination,
 unsupported invoker mode, malformed budget) raises :class:`SchemaError`;
@@ -49,7 +52,9 @@ from benchmarks.capability.suite import CapabilitySuite
 from benchmarks.capability.verifiers import VERIFIERS
 
 FAKE_AGENT_MODE = "fake_agent"
-SUPPORTED_EXECUTION_MODES = frozenset({FAKE_AGENT_MODE})
+HERMES_CLI_STUB_MODE = "hermes_cli_stub"
+LIVE_MODE = "live"
+SUPPORTED_EXECUTION_MODES = frozenset({FAKE_AGENT_MODE, HERMES_CLI_STUB_MODE})
 DEFAULT_ARTIFACT_DEST = "hermes_artifact"
 _RUN_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]*$")
 
@@ -89,9 +94,13 @@ class AgentInvocation:
 
 @dataclass(frozen=True)
 class InvocationOutcome:
+    """``failure`` is a fail-closed attribution error found by the invoker
+    after a zero-exit run (e.g. usage or consumption proof missing)."""
+
     exit_code: int | None
     timed_out: bool
     detail: str = ""
+    failure: str | None = None
 
 
 class AgentInvoker(Protocol):
@@ -118,10 +127,11 @@ class ArgvAgentInvoker:
     execution_mode: str = FAKE_AGENT_MODE
 
     def __post_init__(self) -> None:
-        if self.execution_mode not in SUPPORTED_EXECUTION_MODES:
+        if self.execution_mode != FAKE_AGENT_MODE:
             raise SchemaError(
-                f"invoker: execution_mode must be one of {sorted(SUPPORTED_EXECUTION_MODES)}; "
-                f"live invocation is not implemented (got {self.execution_mode!r})"
+                f"invoker: ArgvAgentInvoker only supports execution_mode {FAKE_AGENT_MODE!r}; "
+                "live invocation is not implemented via raw argv — hermes modes require the "
+                f"attested HermesCliInvoker (got {self.execution_mode!r})"
             )
         argv = self.argv_template
         if not argv or not all(isinstance(a, str) and a and "\x00" not in a for a in argv):
@@ -268,6 +278,40 @@ def _failed(task_id: str, error: str, duration: float, cost: float | None) -> Ta
     )
 
 
+def _validate_live_invocation(invoker: AgentInvoker, live_approval, budget: BudgetConfig) -> None:
+    """Default-deny gate for execution_mode='live'. Raises SchemaError."""
+    # Imported lazily: hermes_adapter imports this module for the invoker seam.
+    from benchmarks.capability.hermes_adapter import HermesCliInvoker, LiveExecutionApproval
+
+    if not isinstance(invoker, HermesCliInvoker) or not invoker.is_live:
+        raise SchemaError(
+            "execution_mode='live' requires the attested HermesCliInvoker built by "
+            "build_live_hermes_invoker; arbitrary invokers cannot select live mode "
+            "(fail closed)"
+        )
+    if not isinstance(live_approval, LiveExecutionApproval):
+        raise SchemaError(
+            "live execution is default-deny: pass an explicit LiveExecutionApproval with "
+            "the exact confirmation phrase and a positive approved budget"
+        )
+    if budget.max_run_usd <= 0:
+        raise SchemaError("live execution requires a positive run accounting ceiling")
+    if budget.max_run_usd > live_approval.max_run_usd:
+        raise SchemaError(
+            f"run ceiling ${budget.max_run_usd:.4f} exceeds the approved live ceiling "
+            f"${live_approval.max_run_usd:.4f} (fail closed)"
+        )
+    if budget.max_task_usd is None:
+        raise SchemaError("live execution requires an explicit per-task accounting ceiling")
+    if budget.max_task_usd <= 0:
+        raise SchemaError("live execution requires a positive per-task accounting ceiling")
+    if budget.max_task_usd > live_approval.max_task_usd:
+        raise SchemaError(
+            f"task ceiling ${budget.max_task_usd:.4f} exceeds the approved live ceiling "
+            f"${live_approval.max_task_usd:.4f} (fail closed)"
+        )
+
+
 def run_local(
     suite: CapabilitySuite,
     *,
@@ -281,16 +325,24 @@ def run_local(
     run_id: str | None = None,
     runs_root: str | Path | None = None,
     keep_workspaces: bool = False,
+    live_approval=None,
 ) -> LocalRunOutcome:
     """Execute every suite task in an isolated workspace via the invoker seam."""
     if run_role not in {"baseline", "candidate"}:
         raise SchemaError("run_role must be 'baseline' or 'candidate'")
     mode = getattr(invoker, "execution_mode", None)
-    if mode not in SUPPORTED_EXECUTION_MODES:
+    if mode == LIVE_MODE:
+        _validate_live_invocation(invoker, live_approval, budget)
+    elif mode not in SUPPORTED_EXECUTION_MODES:
         raise SchemaError(
             f"unsupported invoker execution_mode {mode!r}: only "
-            f"{sorted(SUPPORTED_EXECUTION_MODES)} are implemented, and none of them "
-            "is ever capability evidence"
+            f"{sorted(SUPPORTED_EXECUTION_MODES)} run without live authorization, and "
+            "none of them is ever capability evidence"
+        )
+    elif live_approval is not None:
+        raise SchemaError(
+            f"live_approval was provided for non-live execution_mode {mode!r} "
+            "(refusing ambiguous intent)"
         )
     if run_id is None:
         run_id = f"run-{uuid.uuid4().hex[:12]}"
@@ -305,22 +357,49 @@ def run_local(
             f"artifact digest mismatch: expected {expected_artifact_digest}, "
             f"got {artifact_digest}"
         )
+    bound_artifact_digest = getattr(invoker, "artifact_digest", None)
+    if bound_artifact_digest is not None and bound_artifact_digest != artifact_digest:
+        raise SchemaError(
+            "invoker artifact digest does not match artifact_path: "
+            f"{bound_artifact_digest} != {artifact_digest} (fail closed)"
+        )
+    expected_model = getattr(invoker, "expected_model", None)
+    if expected_model is not None and expected_model != fingerprint.model:
+        raise SchemaError(
+            f"invoker model {expected_model!r} != fingerprint model {fingerprint.model!r} "
+            "(fail closed)"
+        )
+    config_builder = getattr(invoker, "fingerprint_config", None)
+    if callable(config_builder):
+        applied_config = config_builder()
+        if not isinstance(applied_config, dict):
+            raise SchemaError("invoker fingerprint_config() must return a dict (fail closed)")
+        applied_digest = RunFingerprint.from_config(
+            fingerprint.model,
+            applied_config,
+            fingerprint.seed,
+            fingerprint.environment,
+        ).config_digest
+        if applied_digest != fingerprint.config_digest:
+            raise SchemaError(
+                "invoker applied-config digest does not match run fingerprint "
+                f"({applied_digest} != {fingerprint.config_digest}; fail closed)"
+            )
 
     results: list[TaskResult] = []
     spent_usd = 0.0
-    budget_exhausted = False
+    halt_reason: str | None = None
     if runs_root is not None:
         Path(runs_root).mkdir(parents=True, exist_ok=True)
     root = Path(tempfile.mkdtemp(prefix=f"capability-{run_id}-", dir=runs_root))
     retained: Path | None = None
     try:
         for task in suite.tasks:
-            if budget_exhausted:
+            if halt_reason is not None:
                 results.append(
                     _failed(
                         task.task_id,
-                        f"not executed: run budget ${budget.max_run_usd:.4f} "
-                        "already exhausted (fail closed)",
+                        f"not executed: {halt_reason} (fail closed)",
                         0.0,
                         None,
                     )
@@ -347,6 +426,7 @@ def run_local(
             try:
                 outcome = invoker.invoke(invocation)
             except Exception as exc:  # invoker bugs must fail the task, not the harness
+                halt_reason = "prior invocation failed before attributable usage was available"
                 results.append(
                     _failed(
                         task.task_id,
@@ -365,28 +445,39 @@ def run_local(
                 )
             elif outcome.exit_code != 0:
                 error = f"agent exited with code {outcome.exit_code}: {outcome.detail}"
+            elif outcome.failure:
+                error = outcome.failure
 
             if error is None:
                 escaped = _find_symlink(workspace)
                 if escaped is not None:
                     error = f"symlink in final workspace (fail closed): {escaped.relative_to(workspace)}"
 
+            # Account for spend even when the agent/attribution/verifier path
+            # failed.  A failed paid invocation can still cost money.  Missing
+            # or malformed usage makes cumulative spend unknowable, so no
+            # later task may run.
             cost: float | None = None
-            if error is None:
-                try:
-                    usage = load_usage_report(invocation.usage_file)
-                    cost = usage.cost_usd
-                except SchemaError as exc:
-                    error = f"usage report invalid or missing (fail closed): {exc}"
+            try:
+                usage = load_usage_report(invocation.usage_file)
+                cost = usage.cost_usd
+            except SchemaError as exc:
+                usage_error = f"usage report invalid or missing (fail closed): {exc}"
+                error = f"{error}; {usage_error}" if error else usage_error
+                halt_reason = "prior invocation usage/cost is unknown"
             if cost is not None:
                 if budget.max_task_usd is not None and cost > budget.max_task_usd:
-                    error = (
+                    overage = (
                         f"task cost ${cost:.4f} exceeds per-task budget "
                         f"${budget.max_task_usd:.4f} (fail closed)"
                     )
+                    error = f"{error}; {overage}" if error else overage
+                    halt_reason = f"prior task exceeded per-task accounting ceiling ${budget.max_task_usd:.4f}"
                 spent_usd += cost
                 if spent_usd > budget.max_run_usd:
-                    budget_exhausted = True
+                    halt_reason = (
+                        f"observed run accounting ceiling ${budget.max_run_usd:.4f} was exceeded"
+                    )
                     if error is None:
                         error = (
                             f"cumulative cost ${spent_usd:.4f} exceeds run budget "
@@ -433,11 +524,19 @@ def run_local(
             # workspace behind while claiming cleanup succeeded.
             shutil.rmtree(root)
 
-    notes = (
-        f"Local {mode} execution; harness validation only, never live agent "
-        f"capability evidence. total_cost_usd={spent_usd:.4f} "
-        f"budget_usd={budget.max_run_usd:.4f}"
-    )
+    if mode == LIVE_MODE:
+        notes = (
+            "Reserved live current-Hermes CLI mode reached only after structural safety "
+            "blockers were cleared; capability_evidence remains false pending supervised "
+            "contract validation (see docs/CAPABILITY_BENCHMARK.md). "
+            f"total_cost_usd={spent_usd:.4f} budget_usd={budget.max_run_usd:.4f}"
+        )
+    else:
+        notes = (
+            f"Local {mode} execution; harness validation only, never live agent "
+            f"capability evidence. total_cost_usd={spent_usd:.4f} "
+            f"budget_usd={budget.max_run_usd:.4f}"
+        )
     if retained is not None:
         notes += f" retained_workspaces={retained}"
     result = RunResult(

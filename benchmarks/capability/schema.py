@@ -19,7 +19,7 @@ from typing import Any
 
 from benchmarks.capability import SCHEMA_VERSION
 
-EXECUTION_MODES = frozenset({"replay", "dry_run", "fake_agent", "live"})
+EXECUTION_MODES = frozenset({"replay", "dry_run", "fake_agent", "hermes_cli_stub", "live"})
 RUN_ROLES = frozenset({"baseline", "candidate"})
 
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]*$")

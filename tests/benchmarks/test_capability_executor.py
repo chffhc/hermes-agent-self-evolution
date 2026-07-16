@@ -158,10 +158,28 @@ def test_non_fake_invoker_modes_are_rejected(tmp_path: Path) -> None:
         def invoke(self, invocation):  # pragma: no cover - must not be reached
             raise AssertionError("must not run")
 
+    suite = load_suite(_mini_suite(tmp_path))
+    with pytest.raises(SchemaError, match="requires the attested HermesCliInvoker"):
+        run_local(
+            suite,
+            invoker=LiveImpostor(),
+            run_role="baseline",
+            artifact_path=_artifact(tmp_path),
+            fingerprint=_fingerprint(),
+            budget=BudgetConfig(max_run_usd=0.0),
+            runs_root=tmp_path / "runs",
+        )
+
+    class UnknownMode:
+        execution_mode = "telepathy"
+
+        def invoke(self, invocation):  # pragma: no cover - must not be reached
+            raise AssertionError("must not run")
+
     with pytest.raises(SchemaError, match="unsupported invoker execution_mode"):
         run_local(
-            load_suite(_mini_suite(tmp_path)),
-            invoker=LiveImpostor(),
+            suite,
+            invoker=UnknownMode(),
             run_role="baseline",
             artifact_path=_artifact(tmp_path),
             fingerprint=_fingerprint(),
@@ -274,7 +292,7 @@ def test_subprocess_timeout_records_failure_and_cleans_up(tmp_path: Path) -> Non
 
 
 def test_missing_usage_report_fails_closed(tmp_path: Path) -> None:
-    suite = load_suite(_mini_suite(tmp_path))
+    suite = load_suite(_mini_suite(tmp_path, task_count=2))
     result = run_local(
         suite,
         invoker=_fake_invoker("--no-usage", "--solutions", "{task_fixture_dir}/replay"),
@@ -284,9 +302,12 @@ def test_missing_usage_report_fails_closed(tmp_path: Path) -> None:
         budget=BudgetConfig(max_run_usd=0.0),
         runs_root=tmp_path / "runs",
     ).result
-    task = result.results[0]
-    assert task.passed is False and task.cost_usd is None
-    assert "usage report invalid or missing" in task.error
+    first, second = result.results
+    assert first.passed is False and first.cost_usd is None
+    assert first.error is not None and "usage report invalid or missing" in first.error
+    assert second.passed is False
+    assert second.error is not None and "not executed" in second.error
+    assert "usage/cost is unknown" in second.error
 
 
 def test_malformed_usage_report_fails_closed(tmp_path: Path) -> None:
@@ -365,6 +386,7 @@ def test_nonzero_agent_exit_fails_task(tmp_path: Path) -> None:
         runs_root=tmp_path / "runs",
     ).result
     assert result.results[0].passed is False
+    assert result.results[0].cost_usd == 0.0
     assert "exited with code 9" in result.results[0].error
 
 
