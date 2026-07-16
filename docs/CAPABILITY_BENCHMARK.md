@@ -2,7 +2,7 @@
 
 ## Status and evidence boundary
 
-`benchmarks/run_bench.py` remains a repository smoke/proxy check. The Level 1 package in `benchmarks/capability/` adds deterministic task contracts, verifiers, replay self-tests, paired comparison, a local isolated-workspace executor driven by a bundled fake agent, and a current-Hermes CLI adapter foundation (compatibility probe, skill-artifact injection contract, contract-emulating stub, and a fail-closed live design). **Replay, dry-run, fake-agent, and hermes-cli-stub output are always `capability_evidence=false`; they do not measure an agent.** Paid execution is intentionally blocked: current Hermes exposes post-run cost attribution but no enforceable pre-spend USD ceiling, and `TERMINAL_CWD` does not confine absolute filesystem access.
+`benchmarks/run_bench.py` remains a repository smoke/proxy check. The Level 1 package in `benchmarks/capability/` adds deterministic task contracts, verifiers, replay self-tests, paired comparison, a local isolated-workspace executor driven by a bundled fake agent, and a current-Hermes CLI adapter foundation (compatibility probe, skill-artifact injection contract, contract-emulating stub, and a fail-closed live design). **Replay, dry-run, fake-agent, and hermes-cli-stub output are always `capability_evidence=false`; they do not measure an agent. Schema v1 rejects `capability_evidence=true` for every execution mode—including externally supplied `live` JSON—and comparison rejects manually constructed evidence-bearing objects.** Paid execution is intentionally blocked: current Hermes exposes post-run cost attribution but no enforceable pre-spend USD ceiling, and `TERMINAL_CWD` does not confine absolute filesystem access.
 
 ## Local archaeology
 
@@ -70,7 +70,7 @@ In hermes-cli-stub mode, the `HermesCliInvoker` creates a fresh `HERMES_HOME` un
 3. **consumption proof** — the SKILL.md body appears verbatim in the persisted session `system_prompt` (copying without loading is a task failure);
 4. token counts are non-negative integers with nonzero total usage, `estimated_cost_usd` is finite/non-negative, and `cost_status`/`cost_source` prove the cost is attributable (`unknown`/`none` fails closed); strict `usage.json` then feeds the post-run accounting gate.
 
-`control/` retains `invocation.json` (argv + env key names), `stdout.txt`/`stderr.txt`, `session.json`, `trajectory.json`, and `attestation.json` (all marked `capability_evidence=false`). Valid attributable usage is written before the remaining evidence checks, so a model/cwd/consumption failure still counts already-incurred spend; unknown usage halts every later task.
+`control/` retains `invocation.json` (argv + env key names), `stdout.txt`/`stderr.txt`, `session.json`, `trajectory.json`, and `attestation.json` (all marked `capability_evidence=false`). Valid attributable usage is written before the remaining evidence checks, so a model/cwd/consumption failure, nonzero exit, post-session timeout, or later invoker exception still counts already-incurred spend; unknown usage halts every later task.
 
 ## Current CLI
 
@@ -98,5 +98,5 @@ The next live milestone is blocked, in order, by:
 1. **Filesystem confinement** — run the Hermes process and all terminal descendants in a real sandbox/container that permits writes only to the task workspace/control paths while retaining the minimum provider network access. `cwd`/`TERMINAL_CWD` alone is not confinement.
 2. **Pre-spend enforcement** — add a provider/proxy/agent mechanism that rejects calls before the approved USD ceiling is crossed. A timeout, `max_turns`, and post-run `estimated_cost_usd` are useful secondary controls but are not a hard USD budget.
 3. **Supervised contract validation** — only after 1–2 exist, perform the first bounded paid run to confirm state.db cost attribution, model pinning under fallback chains, stderr `session_id` stability, credential routing, and scrubbed-PATH tool behavior.
-4. **Evidence transition** — enable `capability_evidence=true` only for the attested adapter after those checks pass; keep every stub/replay path permanently false.
+4. **Evidence transition** — introduce a new attested evidence schema and enable `capability_evidence=true` only for its verified adapter after those checks pass; schema v1 and every stub/replay path remain permanently false.
 5. **Scale honesty** — the three-task native suite can validate the pipeline but can never support production-readiness or statistical-significance claims; add larger holdout tasks before optimizer gating.

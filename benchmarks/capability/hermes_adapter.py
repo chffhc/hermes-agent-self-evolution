@@ -536,11 +536,23 @@ class HermesCliInvoker:
                 os.killpg(proc.pid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
                 proc.kill()
-            proc.communicate()
+            stdout, stderr = proc.communicate()
+            (invocation.control_dir / "stdout.txt").write_text(stdout[-10_000:], encoding="utf-8")
+            (invocation.control_dir / "stderr.txt").write_text(stderr[-10_000:], encoding="utf-8")
+            # Timeout does not imply zero spend: Hermes may have committed a
+            # billable session before hanging. Preserve the killed process's
+            # output and attribute any valid state before returning failure.
+            try:
+                attribution_failure = self._attribute(invocation, hermes_home, stderr)
+            except Exception as exc:  # usage may already have been written
+                attribution_failure = f"post-timeout attribution error: {type(exc).__name__}: {exc}"
+            detail = f"hermes invocation timed out after {invocation.timeout_seconds}s"
+            if attribution_failure:
+                detail += f"; attribution: {attribution_failure}"
             return InvocationOutcome(
                 exit_code=None,
                 timed_out=True,
-                detail=f"hermes invocation timed out after {invocation.timeout_seconds}s",
+                detail=detail,
             )
         (invocation.control_dir / "stdout.txt").write_text(stdout[-10_000:], encoding="utf-8")
         (invocation.control_dir / "stderr.txt").write_text(stderr[-10_000:], encoding="utf-8")

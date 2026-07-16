@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -308,6 +309,23 @@ def test_stub_run_cannot_claim_capability_evidence(tmp_path: Path) -> None:
         RunResult.from_dict(raw)
 
 
+def test_live_json_and_direct_objects_cannot_forge_capability_evidence(tmp_path: Path) -> None:
+    suite_path = _mini_suite(tmp_path)
+    baseline = _run_stub(tmp_path, suite_path, solve=False).result
+    candidate = _run_stub(tmp_path, suite_path, solve=True).result
+
+    forged_json = candidate.to_dict()
+    forged_json["execution_mode"] = "live"
+    forged_json["capability_evidence"] = True
+    with pytest.raises(SchemaError, match="schema v1 refuses.*including 'live'"):
+        RunResult.from_dict(forged_json)
+
+    forged_baseline = replace(baseline, execution_mode="live", capability_evidence=True)
+    forged_candidate = replace(candidate, execution_mode="live", capability_evidence=True)
+    with pytest.raises(SchemaError, match="manually constructed live"):
+        compare_runs(load_suite(suite_path), forged_baseline, forged_candidate)
+
+
 def test_stub_invoker_binding_mismatches_fail_before_execution(tmp_path: Path) -> None:
     suite = load_suite(_mini_suite(tmp_path))
     artifact_a = _skill_artifact(tmp_path, name="skill-a")
@@ -445,6 +463,27 @@ def test_stub_timeout_kills_process_group_and_cleans_up(tmp_path: Path) -> None:
     assert result.results[0].passed is False
     assert "timed out" in result.results[0].error
     assert list(runs_root.iterdir()) == []
+
+
+def test_stub_timeout_after_session_still_accounts_attributable_spend(tmp_path: Path) -> None:
+    result = run_local(
+        load_suite(_mini_suite(tmp_path, timeout=1)),
+        invoker=build_stub_hermes_invoker(
+            _skill_artifact(tmp_path),
+            solve=True,
+            expected_model="stub/model",
+            behavior=("--cost-usd", "2.0", "--sleep-after-session", "10"),
+        ),
+        run_role="candidate",
+        artifact_path=tmp_path / "careful-edits",
+        fingerprint=_fingerprint(),
+        budget=BudgetConfig(max_run_usd=10.0, max_task_usd=5.0),
+        runs_root=tmp_path / "runs",
+    ).result
+    task = result.results[0]
+    assert task.passed is False and task.cost_usd == 2.0
+    assert task.error is not None and "timed out" in task.error
+    assert "usage report invalid or missing" not in task.error
 
 
 def test_stub_costs_feed_budget_gate(tmp_path: Path) -> None:

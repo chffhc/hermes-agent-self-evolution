@@ -66,6 +66,12 @@ def main() -> int:
     parser.add_argument("--max_turns", type=int, default=20)
     parser.add_argument("--solutions", help="directory copied over the workspace cwd")
     parser.add_argument("--sleep", type=float, default=0.0, help="stall to trigger timeouts")
+    parser.add_argument(
+        "--sleep-after-session",
+        type=float,
+        default=0.0,
+        help="persist usage/session, emit its ID, then stall to test timeout accounting",
+    )
     parser.add_argument("--exit-code", type=int, default=0)
     parser.add_argument("--cost-usd", type=float, default=0.0)
     parser.add_argument("--cost-status", default="estimated")
@@ -161,7 +167,9 @@ def main() -> int:
 
     print(response)
     if not args.omit_session_line:
-        print(f"\nsession_id: {session_id}", file=sys.stderr)
+        print(f"\nsession_id: {session_id}", file=sys.stderr, flush=True)
+    if args.sleep_after_session:
+        time.sleep(args.sleep_after_session)
     return args.exit_code
 
 

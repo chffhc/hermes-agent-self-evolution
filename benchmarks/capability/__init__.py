@@ -8,11 +8,11 @@ adapter foundation (compatibility probe, skill-artifact injection contract,
 contract-emulating stub, fail-closed live design); the older batch_runner
 dry-run seam is kept only as a superseded, non-executable record.
 
-Honesty invariant: only ``execution_mode == "live"`` may ever carry
-``capability_evidence=True``. Replay, fixture, fake-agent, hermes-cli-stub,
-and dry-run outputs measure the harness, not the agent, and are permanently
-labeled as such — and even live runs stay ``capability_evidence=False``
-until the validation blockers in docs/CAPABILITY_BENCHMARK.md are cleared.
+Honesty invariant: schema v1 refuses ``capability_evidence=True`` for every
+execution mode, including externally supplied ``live`` JSON. Replay, fixture,
+fake-agent, hermes-cli-stub, and dry-run outputs measure the harness, not the
+agent. A future attested live-evidence format requires an explicit schema
+transition after the blockers in docs/CAPABILITY_BENCHMARK.md are cleared.
 """
 
 SCHEMA_VERSION = 1

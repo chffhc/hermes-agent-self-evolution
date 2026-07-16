@@ -48,6 +48,11 @@ class Comparison:
 
 
 def _assert_comparable(suite: CapabilitySuite, baseline: RunResult, candidate: RunResult) -> None:
+    if baseline.capability_evidence or candidate.capability_evidence:
+        raise SchemaError(
+            "schema v1 comparisons refuse capability_evidence=true, including manually "
+            "constructed live RunResult objects (fail closed)"
+        )
     if baseline.run_role != "baseline" or candidate.run_role != "candidate":
         raise SchemaError("comparison requires baseline and candidate run roles")
     for field in ("suite_id", "suite_hash", "fingerprint", "execution_mode"):
@@ -100,5 +105,5 @@ def compare_runs(suite: CapabilitySuite, baseline: RunResult, candidate: RunResu
         improvements=improvements,
         duration_delta_seconds=c_duration - b_duration,
         cost_delta_usd=cost_delta,
-        capability_evidence=baseline.capability_evidence and candidate.capability_evidence,
+        capability_evidence=False,
     )

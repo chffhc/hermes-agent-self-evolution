@@ -2,8 +2,9 @@
 
 Every constructor here rejects unknown keys, missing keys, wrong types,
 out-of-range scores/counters, unsafe relative paths, and dishonest evidence
-labels (``capability_evidence=True`` on anything but a live run). Malformed
-input raises :class:`SchemaError` instead of producing a partial object.
+labels. Schema v1 refuses ``capability_evidence=True`` for every execution
+mode, including externally supplied ``live`` JSON. Malformed input raises
+:class:`SchemaError` instead of producing a partial object.
 """
 
 from __future__ import annotations
@@ -448,11 +449,11 @@ class RunResult:
                 f"{ctx}: execution_mode must be one of {sorted(EXECUTION_MODES)}, got {mode!r}"
             )
         evidence = _req_bool(obj, "capability_evidence", ctx)
-        if evidence and mode != "live":
+        if evidence:
             raise SchemaError(
-                f"{ctx}: capability_evidence=true is only valid for execution_mode='live' "
-                f"(got {mode!r}) — fixture/replay/fake-agent/dry-run output is never "
-                "capability evidence"
+                f"{ctx}: capability_evidence=true is only valid after an attested live "
+                "evidence schema is implemented; schema v1 refuses it for every execution "
+                "mode, including 'live', to prevent forged external JSON"
             )
         suite_hash = _req_str(obj, "suite_hash", ctx)
         if not _HEX_DIGEST_RE.match(suite_hash):

@@ -527,6 +527,36 @@ def test_invoker_exception_records_failure_and_cleans_up(tmp_path: Path) -> None
     assert list(runs_root.iterdir()) == []
 
 
+def test_invoker_exception_after_usage_write_still_accounts_spend(tmp_path: Path) -> None:
+    class WritesUsageThenRaises:
+        execution_mode = "fake_agent"
+
+        def invoke(self, invocation):
+            invocation.usage_file.write_text(
+                json.dumps({"cost_usd": 2.0, "input_tokens": 10, "output_tokens": 5})
+            )
+            raise RuntimeError("failed after usage persistence")
+
+    result = run_local(
+        load_suite(_mini_suite(tmp_path, task_count=2)),
+        invoker=WritesUsageThenRaises(),
+        run_role="baseline",
+        artifact_path=_artifact(tmp_path),
+        fingerprint=_fingerprint(),
+        budget=BudgetConfig(max_run_usd=10.0, max_task_usd=5.0),
+        runs_root=tmp_path / "runs",
+    ).result
+    assert len(result.results) == 2
+    assert all(task.cost_usd == 2.0 for task in result.results)
+    assert all(
+        task.error and "failed after usage persistence" in task.error for task in result.results
+    )
+    assert all(
+        task.error and "usage report invalid or missing" not in task.error
+        for task in result.results
+    )
+
+
 def test_fake_run_fingerprint_mismatch_fails_closed(tmp_path: Path) -> None:
     suite = load_suite(_mini_suite(tmp_path))
     artifact = _artifact(tmp_path)

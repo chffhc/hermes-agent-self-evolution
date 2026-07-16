@@ -63,7 +63,7 @@ FAKE_AGENT_SCRIPT = Path(__file__).resolve().parent / "fixtures" / "fake_agent.p
 
 @dataclass(frozen=True)
 class BudgetConfig:
-    """Hard USD budget: per run, and optionally per task. Fail-closed."""
+    """Post-run USD accounting ceilings: per run and optionally per task."""
 
     max_run_usd: float
     max_task_usd: float | None = None
@@ -423,30 +423,24 @@ def run_local(
                 timeout_seconds=task.timeout_seconds,
             )
             started = time.monotonic()
+            outcome: InvocationOutcome | None = None
+            error: str | None = None
             try:
                 outcome = invoker.invoke(invocation)
-            except Exception as exc:  # invoker bugs must fail the task, not the harness
-                halt_reason = "prior invocation failed before attributable usage was available"
-                results.append(
-                    _failed(
-                        task.task_id,
-                        f"invoker failure: {type(exc).__name__}: {exc}",
-                        time.monotonic() - started,
-                        None,
-                    )
-                )
-                continue
+            except Exception as exc:  # still account any usage written before the exception
+                error = f"invoker failure: {type(exc).__name__}: {exc}"
             duration = time.monotonic() - started
 
-            error: str | None = None
-            if outcome.timed_out:
-                error = (
-                    outcome.detail or f"agent invocation timed out after {task.timeout_seconds}s"
-                )
-            elif outcome.exit_code != 0:
-                error = f"agent exited with code {outcome.exit_code}: {outcome.detail}"
-            elif outcome.failure:
-                error = outcome.failure
+            if outcome is not None:
+                if outcome.timed_out:
+                    error = (
+                        outcome.detail
+                        or f"agent invocation timed out after {task.timeout_seconds}s"
+                    )
+                elif outcome.exit_code != 0:
+                    error = f"agent exited with code {outcome.exit_code}: {outcome.detail}"
+                elif outcome.failure:
+                    error = outcome.failure
 
             if error is None:
                 escaped = _find_symlink(workspace)
