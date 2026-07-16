@@ -51,6 +51,7 @@ from benchmarks.capability.executor import (
     AgentInvocation,
     InvocationOutcome,
 )
+from benchmarks.capability.live_gate import structural_live_blockers
 from benchmarks.capability.replay import digest_artifact
 from benchmarks.capability.schema import SchemaError, utc_now_iso
 
@@ -70,11 +71,10 @@ _TRAJECTORY_CONTENT_CHARS = 10_000
 # Structural blockers, not transient setup errors. Current Hermes can report
 # spend only after an invocation, and TERMINAL_CWD scopes the default directory
 # without confining absolute filesystem access. Paid execution stays fail-closed
-# until both invariants have real enforcement.
-_LIVE_EXECUTION_BLOCKERS = (
-    "current Hermes has no enforceable pre-spend USD ceiling; state.db cost is post-run accounting",
-    "TERMINAL_CWD pins the default cwd but does not sandbox terminal writes outside the task workspace",
-)
+# until both invariants have real enforcement. The strings come from the
+# static live_gate requirement definitions; no runtime probe result can
+# shrink this tuple (see benchmarks/capability/live_gate.py).
+_LIVE_EXECUTION_BLOCKERS = structural_live_blockers()
 
 # Every invariant the adapter depends on, checked as literal markers against
 # the read-only checkout. A missing marker means the seam moved and the

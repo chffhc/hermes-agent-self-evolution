@@ -3,10 +3,12 @@
 Defines a fail-closed task/result schema, deterministic workspace verifiers,
 a replay/fixture executor for harness tests, a local isolated-workspace
 executor with an injectable agent-invocation seam and post-run accounting gate,
-paired baseline-vs-candidate comparison gating, and a current-Hermes CLI
-adapter foundation (compatibility probe, skill-artifact injection contract,
-contract-emulating stub, fail-closed live design); the older batch_runner
-dry-run seam is kept only as a superseded, non-executable record.
+paired baseline-vs-candidate comparison gating, a current-Hermes CLI adapter
+foundation (compatibility probe, skill-artifact injection contract,
+contract-emulating stub, fail-closed live design), and typed informational
+live-readiness prerequisites for pre-spend enforcement and OS confinement;
+the older batch_runner dry-run seam is kept only as a superseded,
+non-executable record.
 
 Honesty invariant: schema v1 refuses ``capability_evidence=True`` for every
 execution mode, including externally supplied ``live`` JSON. Replay, fixture,

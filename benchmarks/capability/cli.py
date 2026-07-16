@@ -17,6 +17,7 @@ from benchmarks.capability.hermes_adapter import (
     build_stub_hermes_invoker,
     probe_hermes_checkout,
 )
+from benchmarks.capability.live_gate import evaluate_live_requirements
 from benchmarks.capability.replay import digest_artifact, run_replay
 from benchmarks.capability.schema import RunFingerprint, SchemaError, load_run_result
 from benchmarks.capability.suite import load_suite
@@ -111,6 +112,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     probe.add_argument("--hermes-repo", required=True)
     probe.add_argument("--output")
+
+    readiness = sub.add_parser(
+        "probe-live-readiness",
+        help=(
+            "report the structural live-execution requirements (pre-spend USD "
+            "enforcement, filesystem confinement) as a fail-closed readiness probe; "
+            "informational only — it can never unlock live execution"
+        ),
+    )
+    readiness.add_argument("--output")
 
     def _add_hermes_run_args(cmd: argparse.ArgumentParser) -> None:
         cmd.add_argument("--suite", required=True)
@@ -210,6 +221,13 @@ def main(argv: list[str] | None = None) -> int:
                 _write_json(args.output, payload)
             print(json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False))
             return 0 if report.compatible else 2
+        if args.command == "probe-live-readiness":
+            readiness = evaluate_live_requirements()
+            payload = readiness.to_dict()
+            if args.output:
+                _write_json(args.output, payload)
+            print(json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False))
+            return 0 if readiness.live_ready else 2
         suite = load_suite(args.suite)
         if args.command == "validate":
             payload: dict[str, object] = {
