@@ -313,7 +313,7 @@ def test_json_exact_rejects_nonfinite_expected_values(tmp_path: Path) -> None:
     migration = next(task for task in raw["tasks"] if task["task_id"] == "migrate-settings-schema")
     migration["verifiers"][0]["params"]["expected"]["retries"] = float("nan")
     suite_path.write_text(json.dumps(raw))
-    with pytest.raises(SchemaError, match="not JSON-serializable"):
+    with pytest.raises(SchemaError, match="non-finite JSON constant"):
         load_suite(suite_path)
 
 
@@ -366,6 +366,34 @@ def test_symlink_fixture_path_fails_closed(tmp_path: Path) -> None:
         load_suite(suite_path)
 
 
+def test_suite_loader_rejects_duplicate_keys_and_non_finite_json(tmp_path: Path) -> None:
+    suite_path = tmp_path / "suite.json"
+    suite_path.write_text(
+        '{"schema_version":1,"schema_version":1,"suite_id":"x",' '"description":"x","tasks":[]}',
+        encoding="utf-8",
+    )
+    with pytest.raises(SchemaError, match="duplicate JSON key"):
+        load_suite(suite_path)
+
+    suite_path.write_text(
+        '{"schema_version":1,"suite_id":"x","description":NaN,"tasks":[]}',
+        encoding="utf-8",
+    )
+    with pytest.raises(SchemaError, match="non-finite JSON constant"):
+        load_suite(suite_path)
+
+
+def test_suite_loader_is_bounded_and_types_deep_json_errors(tmp_path: Path) -> None:
+    suite_path = tmp_path / "suite.json"
+    suite_path.write_bytes(b" " * 1_000_001)
+    with pytest.raises(SchemaError, match="document exceeds 1000000 bytes"):
+        load_suite(suite_path)
+
+    suite_path.write_text("[" * 2000 + "0" + "]" * 2000, encoding="utf-8")
+    with pytest.raises(SchemaError, match="invalid strict JSON"):
+        load_suite(suite_path)
+
+
 def _assert_no_holdout_leakage(suite, payload: dict) -> None:
     serialized = json.dumps(payload)
     holdout_tasks = [t for t in suite.tasks if t.split == "holdout"]
@@ -400,6 +428,8 @@ def test_optimizer_feedback_redacts_holdout_identities() -> None:
     )
     feedback = optimizer_feedback(suite, compare_runs(suite, baseline, candidate))
     _assert_no_holdout_leakage(suite, feedback)
+    assert feedback["feedback_version"] == 2
+    assert feedback["suite_hash"] == suite.suite_hash
     assert feedback["development"]["gate_passed"] is True
     assert feedback["development"]["pass_rate_delta"] == 1.0
     assert feedback["capability_evidence"] is False

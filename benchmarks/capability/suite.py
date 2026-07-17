@@ -16,6 +16,8 @@ from benchmarks.capability.schema import (
 )
 from benchmarks.capability.verifiers import VERIFIERS
 
+_MAX_SUITE_BYTES = 1_000_000
+
 
 @dataclass(frozen=True)
 class CapabilitySuite:
@@ -50,13 +52,35 @@ def _require_keys(obj: Any, required: set[str], optional: set[str], ctx: str) ->
 
 
 def load_suite(path: str | Path) -> CapabilitySuite:
-    """Load and validate a suite JSON document and all referenced fixtures."""
+    """Load and validate a bounded, strict-JSON suite and its fixtures."""
     suite_path = Path(path).resolve()
+
+    def _no_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in pairs:
+            if key in result:
+                raise SchemaError("suite: duplicate JSON key (fail closed)")
+            result[key] = value
+        return result
+
+    def _no_non_finite(_constant: str) -> float:
+        raise SchemaError("suite: non-finite JSON constant (fail closed)")
+
     try:
-        raw_text = suite_path.read_text(encoding="utf-8")
-        raw = json.loads(raw_text)
-    except (OSError, json.JSONDecodeError) as exc:
-        raise SchemaError(f"cannot load suite {suite_path}: {exc}") from exc
+        with suite_path.open("rb") as handle:
+            encoded = handle.read(_MAX_SUITE_BYTES + 1)
+        if len(encoded) > _MAX_SUITE_BYTES:
+            raise SchemaError(f"suite: document exceeds {_MAX_SUITE_BYTES} bytes")
+        raw_text = encoded.decode("utf-8")
+        raw = json.loads(
+            raw_text,
+            object_pairs_hook=_no_duplicate_keys,
+            parse_constant=_no_non_finite,
+        )
+    except SchemaError:
+        raise
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError) as exc:
+        raise SchemaError(f"cannot load suite {suite_path}: invalid strict JSON") from exc
 
     _require_keys(raw, {"schema_version", "suite_id", "description", "tasks"}, set(), "suite")
     if raw["schema_version"] != 1:

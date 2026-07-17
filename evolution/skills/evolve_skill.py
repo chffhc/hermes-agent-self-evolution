@@ -15,6 +15,12 @@ import dspy
 from rich.console import Console
 from rich.table import Table
 
+from benchmarks.capability.suite import load_suite as load_capability_suite
+from evolution.core.capability_feedback import (
+    CapabilityFeedbackError,
+    CapabilityFeedbackPolicy,
+    load_optimizer_feedback,
+)
 from evolution.core.config import (
     EvolutionConfig,
     make_dashscope_lm,
@@ -54,11 +60,21 @@ def evolve(
     max_cost_usd: float | None = None,
     create_pr: bool = False,
     pr_dry_run: bool = False,
+    capability_feedback: str | Path | None = None,
+    capability_suite: str | Path | None = None,
 ) -> dict | None:
     """Main evolution function — orchestrates the full optimization loop.
 
     ``max_cost_usd`` sets a hard USD budget on the global cost tracker for
     this process; ``None`` keeps the EVOLUTION_MAX_COST_USD env default.
+
+    ``capability_feedback`` optionally points at a development-only optimizer
+    feedback JSON produced by ``python -m benchmarks.capability compare
+    --optimizer-feedback``. ``capability_suite`` is required with it and binds
+    the feedback to the trusted suite ID, hash, development task set, and
+    critical-task policy before any billable work. A full holdout-aware
+    comparison document is refused; only the validated development section is
+    printed and recorded in ``metrics.json``.
 
     ``create_pr``/``pr_dry_run`` are strictly opt-in: by default no PR-related
     git operations happen at all. ``pr_dry_run`` renders the redacted PR
@@ -72,6 +88,43 @@ def evolve(
     return a metrics dict with ``deployable: False`` and an ``error``;
     ``dry_run`` returns None.
     """
+
+    # ── 0. Optional capability harness feedback ─────────────────────────
+    # Validated fail-closed before any billable work. Only the development-
+    # only optimizer_feedback document is accepted; a full Comparison
+    # payload (which carries holdout outcomes) raises CapabilityFeedbackError.
+    capability_context = None
+    if (capability_feedback is None) != (capability_suite is None):
+        raise CapabilityFeedbackError(
+            "optimizer feedback rejected: --capability-feedback and "
+            "--capability-suite must be supplied together (fail closed)"
+        )
+    if capability_feedback is not None and capability_suite is not None:
+        try:
+            trusted_suite = load_capability_suite(capability_suite)
+        except Exception as exc:  # noqa: BLE001 - convert suite backend failures to typed errors
+            raise CapabilityFeedbackError(
+                "optimizer feedback rejected: trusted capability suite could not be "
+                "loaded and validated (fail closed)"
+            ) from exc
+        development_ids = frozenset(trusted_suite.development_task_ids)
+        critical_development_ids = frozenset(
+            task.task_id
+            for task in trusted_suite.tasks
+            if task.split == "development" and task.critical
+        )
+        capability_context = load_optimizer_feedback(
+            capability_feedback,
+            policy=CapabilityFeedbackPolicy(
+                suite_id=trusted_suite.suite_id,
+                suite_hash=trusted_suite.suite_hash,
+                development_task_ids=development_ids,
+                critical_development_task_ids=critical_development_ids,
+            ),
+        )
+    capability_document = (
+        capability_context.to_document() if capability_context is not None else None
+    )
 
     hermes_agent_path = resolve_hermes_agent_path(hermes_repo)
     config = EvolutionConfig(
@@ -114,8 +167,15 @@ def evolve(
     dspy.configure(lm=lm, adapter=ChatAdapter())
     console.print(f"  DSPy configured: {eval_model} (ChatAdapter)")
 
+    if capability_context is not None:
+        console.print("\n[bold]Capability harness feedback (development slice only)[/bold]")
+        for line in capability_context.prompt_section().splitlines():
+            console.print(f"  {line}")
+
     if dry_run:
         console.print("\n[bold green]DRY RUN — setup validated successfully.[/bold green]")
+        if capability_context is not None:
+            console.print("  Capability feedback validated (development-only document)")
         console.print(f"  Would generate eval dataset (source: {eval_source})")
         console.print(f"  Would run GEPA optimization ({iterations} iterations)")
         console.print("  Would validate constraints and create PR")
@@ -260,7 +320,12 @@ def evolve(
         output_path.write_text(str(e), encoding="utf-8")
         console.print(f"[red]✗ Could not extract evolved skill text: {e}[/red]")
         console.print(f"  Saved extraction error to {output_path}")
-        return _failed_run_metrics(skill_name, str(output_path.parent), f"extraction failed: {e}")
+        return _failed_run_metrics(
+            skill_name,
+            str(output_path.parent),
+            f"extraction failed: {e}",
+            capability_feedback=capability_document,
+        )
     evolved_full = reassemble_skill(skill["frontmatter"], evolved_body)
 
     # ── 7. Validate evolved skill ───────────────────────────────────────
@@ -282,7 +347,10 @@ def evolve(
         output_path.write_text(evolved_full)
         console.print(f"  Saved failed variant to {output_path}")
         return _failed_run_metrics(
-            skill_name, str(output_path.parent), "evolved skill failed constraint gates"
+            skill_name,
+            str(output_path.parent),
+            "evolved skill failed constraint gates",
+            capability_feedback=capability_document,
         )
 
     if config.run_pytest:
@@ -309,7 +377,10 @@ def evolve(
             output_path.write_text(evolved_full, encoding="utf-8")
             console.print(f"  Saved failed variant to {output_path}")
             return _failed_run_metrics(
-                skill_name, str(output_path.parent), "evolved skill failed pytest gate"
+                skill_name,
+                str(output_path.parent),
+                "evolved skill failed pytest gate",
+                capability_feedback=capability_document,
             )
 
     # ── 8. Evaluate on holdout set ──────────────────────────────────────
@@ -407,6 +478,9 @@ def evolve(
         "deployable": all_pass,
         "output_dir": str(output_dir),
     }
+    if capability_document is not None:
+        # Only the re-validated development-only view; never a full comparison.
+        metrics["capability_feedback"] = capability_document
     (output_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
 
     console.print(f"\n  Output saved to {output_dir}/")
@@ -525,15 +599,27 @@ def _handle_pr_request(
     )
 
 
-def _failed_run_metrics(skill_name: str, output_dir: str, error: str) -> dict:
-    """Metrics for a run that failed a gate — never deployable, no improvement."""
-    return {
+def _failed_run_metrics(
+    skill_name: str,
+    output_dir: str,
+    error: str,
+    *,
+    capability_feedback: dict | None = None,
+) -> dict:
+    """Persist metrics for a paid run that failed a gate, including provenance."""
+    metrics = {
         "skill_name": skill_name,
         "improvement": 0.0,
         "deployable": False,
         "output_dir": output_dir,
         "error": error,
     }
+    if capability_feedback is not None:
+        metrics["capability_feedback"] = capability_feedback
+    metrics_dir = Path(output_dir)
+    metrics_dir.mkdir(parents=True, exist_ok=True)
+    (metrics_dir / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+    return metrics
 
 
 @click.command()
@@ -570,6 +656,19 @@ def _failed_run_metrics(skill_name: str, output_dir: str, error: str) -> dict:
     help="Render the redacted PR title/body/diff without any git or GitHub "
     "side effects (takes precedence over --create-pr)",
 )
+@click.option(
+    "--capability-feedback",
+    default=None,
+    help="Path to a development-only optimizer feedback JSON produced by "
+    "'python -m benchmarks.capability compare --optimizer-feedback'; requires "
+    "--capability-suite and is validated fail-closed",
+)
+@click.option(
+    "--capability-suite",
+    default=None,
+    help="Trusted capability suite JSON used to bind feedback to its suite ID, "
+    "hash, development task set, and critical-task policy",
+)
 def main(
     skill,
     iterations,
@@ -583,6 +682,8 @@ def main(
     max_cost_usd,
     create_pr,
     pr_dry_run,
+    capability_feedback,
+    capability_suite,
 ):
     """Evolve a Hermes Agent skill using DSPy + GEPA optimization."""
     try:
@@ -599,6 +700,8 @@ def main(
             max_cost_usd=max_cost_usd,
             create_pr=create_pr,
             pr_dry_run=pr_dry_run,
+            capability_feedback=capability_feedback,
+            capability_suite=capability_suite,
         )
     except EvolutionError as e:
         console.print(f"[red]✗ {e}[/red]")

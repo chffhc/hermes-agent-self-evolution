@@ -42,7 +42,29 @@ os.environ["PYTHONUNBUFFERED"] = "1"  # noqa: E402
     help="Hard USD budget for LLM API cost; the run aborts once estimated spend "
     "exceeds it (overrides EVOLUTION_MAX_COST_USD)",
 )
-def main(skill, iterations, eval_source, dataset_path, optimizer_model, eval_model, max_cost_usd):
+@click.option(
+    "--capability-feedback",
+    default=None,
+    help="Path to a development-only optimizer feedback JSON produced by "
+    "'python -m benchmarks.capability compare --optimizer-feedback'; requires "
+    "--capability-suite and is validated fail-closed",
+)
+@click.option(
+    "--capability-suite",
+    default=None,
+    help="Trusted capability suite JSON used to bind feedback provenance and task policy",
+)
+def main(
+    skill,
+    iterations,
+    eval_source,
+    dataset_path,
+    optimizer_model,
+    eval_model,
+    max_cost_usd,
+    capability_feedback,
+    capability_suite,
+):
     """Run skill evolution with configurable parameters."""
     print("=== Starting Evolution ===", flush=True)
     print(f"Skill: {skill}", flush=True)
@@ -60,6 +82,8 @@ def main(skill, iterations, eval_source, dataset_path, optimizer_model, eval_mod
         "optimizer_model": optimizer_model,
         "eval_model": eval_model,
         "max_cost_usd": max_cost_usd,
+        "capability_feedback": capability_feedback,
+        "capability_suite": capability_suite,
     }
     if dataset_path:
         kwargs["dataset_path"] = dataset_path

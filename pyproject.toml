@@ -38,8 +38,24 @@ openevolve = [
 Homepage = "https://github.com/NousResearch/hermes-agent-self-evolution"
 Repository = "https://github.com/NousResearch/hermes-agent-self-evolution"
 
+[tool.setuptools]
+include-package-data = false
+
 [tool.setuptools.packages.find]
-include = ["evolution*"]
+include = ["evolution*", "benchmarks*"]
+namespaces = false
+
+[tool.setuptools.package-data]
+"benchmarks.capability" = [
+    "fixtures/*.py",
+    "suites/**/*.json",
+    "suites/**/*.txt",
+    "suites/**/*.log",
+    "suites/**/*.py",
+]
+
+[tool.setuptools.exclude-package-data]
+"*" = ["*.pyc", "*.pyo", "__pycache__/*.pyc", "__pycache__/*.pyo", "**/__pycache__/**"]
 
 [tool.ruff]
 line-length = 100

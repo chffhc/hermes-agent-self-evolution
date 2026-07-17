@@ -1,0 +1,3 @@
+# Build artifacts must never depend on local interpreter caches.
+global-exclude *.pyc *.pyo
+prune **/__pycache__

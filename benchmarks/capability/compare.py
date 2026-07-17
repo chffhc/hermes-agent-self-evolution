@@ -165,8 +165,9 @@ def optimizer_feedback(suite: CapabilitySuite, comparison: Comparison) -> dict[s
     development_gate_passed = not dev_critical and development_pass_rate_delta >= 0
 
     return {
-        "feedback_version": 1,
+        "feedback_version": 2,
         "suite_id": suite.suite_id,
+        "suite_hash": suite.suite_hash,
         "capability_evidence": False,
         "development": {
             "task_count": len(development),
