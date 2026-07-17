@@ -24,7 +24,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from benchmarks.capability.schema import SchemaError, safe_relative_path
+from benchmarks.capability.schema import (
+    SchemaError,
+    is_ignored_fixture_cache_path,
+    safe_relative_path,
+)
 
 
 class VerifierConfigError(SchemaError):
@@ -54,7 +58,14 @@ def _resolve_in(root: Path, rel: str, ctx: str) -> Path:
 def _validate_file_exact(params: dict[str, Any], task_dir: Path) -> None:
     _check_param_keys(params, {"path", "expected_file"}, "file_exact")
     safe_relative_path(params.get("path"), "file_exact: path")
-    expected = _resolve_in(task_dir, params.get("expected_file"), "file_exact: expected_file")
+    expected_relative = safe_relative_path(params.get("expected_file"), "file_exact: expected_file")
+    if expected_relative.parts[0] in {"workspace", "replay"} and is_ignored_fixture_cache_path(
+        Path(*expected_relative.parts[1:])
+    ):
+        raise VerifierConfigError(
+            "file_exact: expected_file may not reference a cache-excluded " "workspace/replay asset"
+        )
+    expected = _resolve_in(task_dir, str(expected_relative), "file_exact: expected_file")
     if not expected.is_file():
         raise VerifierConfigError(f"file_exact: expected_file missing: {expected}")
 
@@ -133,6 +144,84 @@ def _run_json_subset(
     return VerifierOutcome(True, f"JSON subset match: {params['path']}")
 
 
+# --- json_exact -------------------------------------------------------------
+# params: {"path": <workspace-relative>, "expected": <JSON value>}
+# Objects must have exactly the expected keys; scalar JSON types are strict.
+
+
+def _validate_json_exact(params: dict[str, Any], task_dir: Path) -> None:
+    _check_param_keys(params, {"path", "expected"}, "json_exact")
+    safe_relative_path(params.get("path"), "json_exact: path")
+    if "expected" not in params:
+        raise VerifierConfigError("json_exact: 'expected' is required")
+    try:
+        json.dumps(params["expected"], allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise VerifierConfigError(f"json_exact: 'expected' not JSON-serializable: {exc}") from exc
+
+
+def _json_exact_mismatch(expected: Any, actual: Any, path: str) -> str | None:
+    if type(expected) is not type(actual):
+        return f"{path}: expected type {type(expected).__name__}, " f"got {type(actual).__name__}"
+    if isinstance(expected, dict):
+        expected_keys = set(expected)
+        actual_keys = set(actual)
+        if expected_keys != actual_keys:
+            return (
+                f"{path}: key mismatch; missing={sorted(expected_keys - actual_keys)} "
+                f"extra={sorted(actual_keys - expected_keys)}"
+            )
+        for key, sub in expected.items():
+            mismatch = _json_exact_mismatch(sub, actual[key], f"{path}.{key}")
+            if mismatch:
+                return mismatch
+        return None
+    if isinstance(expected, list):
+        if len(expected) != len(actual):
+            return f"{path}: expected {len(expected)} items, got {len(actual)}"
+        for index, (expected_item, actual_item) in enumerate(zip(expected, actual, strict=True)):
+            mismatch = _json_exact_mismatch(expected_item, actual_item, f"{path}[{index}]")
+            if mismatch:
+                return mismatch
+        return None
+    return None if expected == actual else f"{path}: expected {expected!r}, got {actual!r}"
+
+
+def _load_json_without_duplicate_keys(text: str) -> Any:
+    def object_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate object key {key!r}")
+            result[key] = value
+        return result
+
+    def reject_constant(value: str) -> None:
+        raise ValueError(f"non-finite JSON number {value!r}")
+
+    return json.loads(
+        text,
+        object_pairs_hook=object_pairs,
+        parse_constant=reject_constant,
+    )
+
+
+def _run_json_exact(
+    workspace: Path, task_dir: Path, params: dict[str, Any], timeout_seconds: float
+) -> VerifierOutcome:
+    target = _resolve_in(workspace, params["path"], "json_exact: path")
+    if not target.is_file():
+        return VerifierOutcome(False, f"missing file: {params['path']}")
+    try:
+        actual = _load_json_without_duplicate_keys(target.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
+        return VerifierOutcome(False, f"invalid JSON in {params['path']}: {exc}")
+    mismatch = _json_exact_mismatch(params["expected"], actual, "$")
+    if mismatch:
+        return VerifierOutcome(False, mismatch)
+    return VerifierOutcome(True, f"exact JSON match: {params['path']}")
+
+
 # --- command_exit -----------------------------------------------------------
 # params: {"argv": ["python", ...], "expected_exit": 0}
 # argv[0] must be the literal sentinel "python" (replaced with the current
@@ -156,6 +245,10 @@ def _validate_command_exit(params: dict[str, Any], task_dir: Path) -> None:
     if any("\x00" in a for a in argv):
         raise VerifierConfigError("command_exit: NUL byte in argv")
     script = safe_relative_path(argv[1], "command_exit: script")
+    if is_ignored_fixture_cache_path(Path(script)):
+        raise VerifierConfigError(
+            "command_exit: script may not reference a cache-excluded workspace asset"
+        )
     if script.suffix != ".py":
         raise VerifierConfigError("command_exit: argv[1] must be a workspace-relative .py file")
     script_path = _resolve_in(task_dir / "workspace", str(script), "command_exit: script")
@@ -208,7 +301,12 @@ def _validate_protected_unchanged(params: dict[str, Any], task_dir: Path) -> Non
     if not isinstance(paths, list) or not paths:
         raise VerifierConfigError("protected_unchanged: 'paths' must be a non-empty list")
     for p in paths:
-        original = _resolve_in(task_dir / "workspace", p, "protected_unchanged: paths")
+        relative = safe_relative_path(p, "protected_unchanged: paths")
+        if is_ignored_fixture_cache_path(Path(relative)):
+            raise VerifierConfigError(
+                "protected_unchanged: paths may not reference cache-excluded assets"
+            )
+        original = _resolve_in(task_dir / "workspace", str(relative), "protected_unchanged: paths")
         if not original.is_file():
             raise VerifierConfigError(
                 f"protected_unchanged: {p!r} does not exist in the fixture workspace"
@@ -256,6 +354,7 @@ VERIFIERS: dict[str, VerifierType] = {
     for v in (
         VerifierType("file_exact", _validate_file_exact, _run_file_exact),
         VerifierType("json_subset", _validate_json_subset, _run_json_subset),
+        VerifierType("json_exact", _validate_json_exact, _run_json_exact),
         VerifierType("command_exit", _validate_command_exit, _run_command_exit),
         VerifierType(
             "protected_unchanged", _validate_protected_unchanged, _run_protected_unchanged

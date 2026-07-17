@@ -695,6 +695,8 @@ def test_cli_run_hermes_live_exact_phrase_still_cannot_bypass_safety_blockers(
     )
     assert code == 2
     assert not out.exists()
-    message = capsys.readouterr().out
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    message = captured.err
     assert "pre-spend USD ceiling" in message
     assert "does not sandbox" in message

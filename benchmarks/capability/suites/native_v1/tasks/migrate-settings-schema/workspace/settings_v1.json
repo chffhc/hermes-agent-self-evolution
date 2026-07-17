@@ -1,0 +1,6 @@
+{
+  "schema": 1,
+  "colour": "blue",
+  "retries": "3",
+  "verbose": "true"
+}

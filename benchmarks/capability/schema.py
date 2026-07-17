@@ -22,6 +22,7 @@ from benchmarks.capability import SCHEMA_VERSION
 
 EXECUTION_MODES = frozenset({"replay", "dry_run", "fake_agent", "hermes_cli_stub", "live"})
 RUN_ROLES = frozenset({"baseline", "candidate"})
+TASK_SPLITS = frozenset({"development", "holdout"})
 
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]*$")
 _HEX_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -66,6 +67,14 @@ def safe_relative_path(value: Any, ctx: str) -> PurePosixPath:
     if any(seg in ("", ".", "..") for seg in parts):
         raise SchemaError(f"{ctx}: unsafe path segment in {value!r}")
     return PurePosixPath(value)
+
+
+def is_ignored_fixture_cache_path(relative: PurePosixPath | Path) -> bool:
+    """Return whether a copied-fixture path is transient cache/OS data."""
+    return any(
+        part == "__pycache__" or part == ".DS_Store" or part.endswith(".pyc")
+        for part in relative.parts
+    )
 
 
 def _check_keys(obj: Any, required: frozenset, optional: frozenset, ctx: str) -> None:
@@ -159,11 +168,12 @@ class TaskSpec:
     timeout_seconds: float
     critical: bool
     description: str = ""
+    split: str = "development"
 
     _REQUIRED = frozenset(
         {"task_id", "category", "prompt", "fixture", "verifiers", "timeout_seconds", "critical"}
     )
-    _OPTIONAL = frozenset({"description"})
+    _OPTIONAL = frozenset({"description", "split"})
 
     @classmethod
     def from_dict(cls, obj: Any) -> TaskSpec:
@@ -181,6 +191,9 @@ class TaskSpec:
         description = obj.get("description", "")
         if not isinstance(description, str):
             raise SchemaError(f"{ctx}: 'description' must be a string")
+        split = obj.get("split", "development")
+        if not isinstance(split, str) or split not in TASK_SPLITS:
+            raise SchemaError(f"{ctx}: 'split' must be one of {sorted(TASK_SPLITS)}, got {split!r}")
         return cls(
             task_id=task_id,
             category=_req_str(obj, "category", ctx, slug=True),
@@ -190,6 +203,7 @@ class TaskSpec:
             timeout_seconds=_req_number(obj, "timeout_seconds", ctx, minimum=1, maximum=3600),
             critical=_req_bool(obj, "critical", ctx),
             description=description,
+            split=split,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -204,6 +218,8 @@ class TaskSpec:
         }
         if self.description:
             d["description"] = self.description
+        if self.split != "development":
+            d["split"] = self.split
         return d
 
 

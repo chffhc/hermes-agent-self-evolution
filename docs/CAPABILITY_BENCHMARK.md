@@ -2,7 +2,7 @@
 
 ## Status and evidence boundary
 
-`benchmarks/run_bench.py` remains a repository smoke/proxy check. The Level 1 package in `benchmarks/capability/` adds deterministic task contracts, verifiers, replay self-tests, paired comparison, a local isolated-workspace executor driven by a bundled fake agent, a current-Hermes CLI adapter foundation (compatibility probe, skill-artifact injection contract, contract-emulating stub, and a fail-closed live design), and a structural live-readiness gate that turns the two live-execution blockers into typed fail-closed contracts with an informational `probe-live-readiness` command. **Replay, dry-run, fake-agent, and hermes-cli-stub output are always `capability_evidence=false`; they do not measure an agent. Schema v1 rejects `capability_evidence=true` for every execution mode—including externally supplied `live` JSON—and comparison rejects manually constructed evidence-bearing objects.** Paid execution is intentionally blocked: current Hermes exposes post-run cost attribution but no enforceable pre-spend USD ceiling, and `TERMINAL_CWD` does not confine absolute filesystem access.
+`benchmarks/run_bench.py` remains a repository smoke/proxy check. The Level 1 package in `benchmarks/capability/` adds deterministic task contracts with development/holdout namespacing and a development-only optimizer feedback channel that withholds all holdout outcomes, verifiers, replay self-tests, paired comparison, a local isolated-workspace executor driven by a bundled fake agent, a current-Hermes CLI adapter foundation (compatibility probe, skill-artifact injection contract, contract-emulating stub, and a fail-closed live design), and a structural live-readiness gate that turns the two live-execution blockers into typed fail-closed contracts with an informational `probe-live-readiness` command. **Replay, dry-run, fake-agent, and hermes-cli-stub output are always `capability_evidence=false`; they do not measure an agent. Schema v1 rejects `capability_evidence=true` for every execution mode—including externally supplied `live` JSON—and comparison rejects manually constructed evidence-bearing objects.** Paid execution is intentionally blocked: current Hermes exposes post-run cost attribution but no enforceable pre-spend USD ceiling, and `TERMINAL_CWD` does not confine absolute filesystem access.
 
 ## Local archaeology
 
@@ -16,7 +16,7 @@ That removal deleted more than 8,000 lines spanning agent loops, parser copies, 
 
 ## Three levels
 
-1. **Native deterministic suite** — cheap private regression tasks with disposable workspaces and programmatic verifiers. This repository now has a three-task harness-validation suite covering file editing, JSON transformation, and code repair.
+1. **Native deterministic suite** — cheap private regression tasks with disposable workspaces and programmatic verifiers. This repository now has a five-task harness-validation suite (three development tasks covering file editing, JSON transformation, and code repair; two holdout tasks covering text deduplication and schema migration) with development/holdout namespacing.
 2. **Historical/external adapters** — modern adapters for TBLite, YC-Bench, and Terminal-Bench 2, without restoring the Atropos stack.
 3. **Heavy public benchmarks** — SWE-bench Verified, GAIA, OSWorld/WebArena, or similar suites run periodically, not on every optimizer iteration.
 
@@ -39,6 +39,13 @@ Only the evolved artifact may differ. Candidate injection must occur in an isola
 - Tests and protected files can be marked immutable.
 - Task IDs and expected outputs must not be embedded into candidate artifacts.
 - Fixture/replay runs can validate the harness but can never be labeled as agent capability evidence.
+- Run workspaces receive only fixture bytes bound by the suite hash: under copied `workspace`/`replay` roots, both hashing and `copy_fixture_tree` apply the same component-wise `__pycache__`/`*.pyc`/`.DS_Store` exclusion, so a stray local cache cannot change execution through unbound bytes (Python's `.pyc` staleness check is mtime-based, which this project's provenance model must not rely on). Cache-named assets outside copied roots—including verifier-side expected data—remain hash-bound rather than being silently excluded. Verifier references that depend on original copied-root assets (`file_exact.expected_file`, `protected_unchanged.paths`, and `command_exit` scripts) are rejected at suite-load time when they target cache-excluded paths under `workspace`/`replay`, preventing an ignored file from becoming an unbound verifier dependency.
+
+## Development/holdout split (namespacing, not secrecy)
+
+*Implemented:* every task carries an optional `split` field (`development` | `holdout`, default `development`; any other type or value fails suite validation closed). `CapabilitySuite` exposes `development_task_ids`/`holdout_task_ids`, overlapping or nested fixture directories fail closed, and the native suite now has two holdout tasks (`dedupe-visitor-log`, `migrate-settings-schema`) in categories distinct from the development tasks; schema migration uses strict, duplicate-key-rejecting semantic JSON equality so extra legacy fields or wrong scalar types cannot pass. `optimizer_feedback(suite, comparison)` (also `compare --optimizer-feedback <path>`) is a development-only document: it exposes development task regressions/improvements and a development-only gate/delta, but withholds holdout task identities, outcomes, counts, the full-suite gate, and full-suite metric deltas. When the flag is present the CLI also prints only that feedback document; a full holdout-aware comparison is written separately only when `--output` is explicitly supplied for human review, and the related files are replaced as a rollback-safe transaction when both are requested. Holdout tasks still participate fully in the human comparison gate. Feedback built from a `capability_evidence=true` comparison, malformed task lists, or task IDs outside the suite fails closed; in optimizer-feedback mode, suite-loading and run-comparison failures emit only a fixed holdout-safe diagnostic on stderr and leave stdout/output artifacts untouched.
+
+*Still missing / explicitly not claimed:* holdout fixtures and their replay answers live in this repository, so the split is namespacing plus a feedback-redaction seam — not secrecy against a reader of the repo. Nothing wires the evolution optimizer to `optimizer_feedback` yet; that integration must consume only this document. Five deterministic tasks validate the pipeline and support no statistical-significance or agent-capability claim in any mode.
 
 ## Local executor seam (`run-fake`)
 
@@ -84,7 +91,7 @@ python -m benchmarks.capability probe-live-readiness   # structural blocker stat
 python -m benchmarks.capability run-hermes-stub --suite ... --role candidate \
     --artifact <skill-dir> --model stub/model --environment stub-v1 --solve --output out.json
 python -m benchmarks.capability run-hermes-live ...   # intentionally blocked; see below
-python -m benchmarks.capability compare ...
+python -m benchmarks.capability compare ... [--optimizer-feedback feedback.json]
 python -m benchmarks.capability plan-batch ...        # superseded, non-executable record
 ```
 
@@ -108,4 +115,4 @@ The next live milestone is blocked, in order, by:
 2. **Pre-spend enforcement** — add a provider/proxy/agent mechanism that rejects calls before the approved USD ceiling is crossed. A timeout, `max_turns`, and post-run `estimated_cost_usd` are useful secondary controls but are not a hard USD budget. *Implemented so far:* shape validation and explicit fail-closed guards. *Still missing:* the enforcement mechanism, execution-context/approval binding, freshness/signature validation, and an identity-bound independent verifier.
 3. **Supervised contract validation** — only after 1–2 exist, perform the first bounded paid run to confirm state.db cost attribution, model pinning under fallback chains, stderr `session_id` stability, credential routing, and scrubbed-PATH tool behavior.
 4. **Evidence transition** — introduce a new attested evidence schema and enable `capability_evidence=true` only for its verified adapter after those checks pass; schema v1 and every stub/replay path remain permanently false.
-5. **Scale honesty** — the three-task native suite can validate the pipeline but can never support production-readiness or statistical-significance claims; add larger holdout tasks before optimizer gating.
+5. **Scale honesty** — the native suite can validate the pipeline but can never support production-readiness or statistical-significance claims. *Implemented so far:* development/holdout namespacing, fail-closed split validation, a two-task holdout slice, and a development-only `optimizer_feedback` document that exposes no holdout outcomes. *Still missing:* a substantially larger holdout set, out-of-repo holdout storage if secrecy is ever required, and the optimizer integration that consumes only the redacted feedback.

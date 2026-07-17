@@ -1,13 +1,14 @@
 {
   "schema_version": 1,
   "suite_id": "hermes-native-v1",
-  "description": "Small deterministic harness-validation suite. Replay results are not agent capability evidence.",
+  "description": "Small deterministic harness-validation suite with development/holdout namespacing. Replay results are not agent capability evidence.",
   "tasks": [
     {
       "task_id": "edit-release-note",
       "category": "file-editing",
       "prompt": "Replace the placeholder in release.txt with exactly: release=ready, preserving the final newline.",
       "fixture": "tasks/edit-release-note",
+      "split": "development",
       "verifiers": [
         {"type": "file_exact", "params": {"path": "release.txt", "expected_file": "expected/release.txt"}}
       ],
@@ -19,6 +20,7 @@
       "category": "data-transformation",
       "prompt": "Read inventory.json and write summary.json with total_units=5 and names sorted alphabetically.",
       "fixture": "tasks/transform-inventory-json",
+      "split": "development",
       "verifiers": [
         {"type": "json_subset", "params": {"path": "summary.json", "expected": {"total_units": 5, "names": ["cable", "modem"]}}}
       ],
@@ -30,12 +32,39 @@
       "category": "code-repair",
       "prompt": "Fix calculator.py so the supplied tests pass. Do not modify test_calculator.py.",
       "fixture": "tasks/repair-calculator",
+      "split": "development",
       "verifiers": [
         {"type": "command_exit", "params": {"argv": ["python", "test_calculator.py"], "expected_exit": 0}},
         {"type": "protected_unchanged", "params": {"paths": ["test_calculator.py"]}}
       ],
       "timeout_seconds": 20,
       "critical": true
+    },
+    {
+      "task_id": "dedupe-visitor-log",
+      "category": "text-deduplication",
+      "prompt": "Read visitors.log and write visitors_unique.log listing each visitor exactly once, preserving first-appearance order, one name per line with a trailing newline. Do not modify visitors.log.",
+      "fixture": "tasks/dedupe-visitor-log",
+      "split": "holdout",
+      "verifiers": [
+        {"type": "file_exact", "params": {"path": "visitors_unique.log", "expected_file": "expected/visitors_unique.log"}},
+        {"type": "protected_unchanged", "params": {"paths": ["visitors.log"]}}
+      ],
+      "timeout_seconds": 10,
+      "critical": false
+    },
+    {
+      "task_id": "migrate-settings-schema",
+      "category": "schema-migration",
+      "prompt": "Migrate settings_v1.json to a new file settings_v2.json: set schema to 2, rename colour to color, convert retries to an integer and verbose to a boolean. Do not modify settings_v1.json.",
+      "fixture": "tasks/migrate-settings-schema",
+      "split": "holdout",
+      "verifiers": [
+        {"type": "json_exact", "params": {"path": "settings_v2.json", "expected": {"schema": 2, "color": "blue", "retries": 3, "verbose": true}}},
+        {"type": "protected_unchanged", "params": {"paths": ["settings_v1.json"]}}
+      ],
+      "timeout_seconds": 10,
+      "critical": false
     }
   ]
 }

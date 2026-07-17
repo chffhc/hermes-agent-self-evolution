@@ -38,7 +38,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from benchmarks.capability.replay import digest_artifact
+from benchmarks.capability.replay import copy_fixture_tree, digest_artifact
 from benchmarks.capability.schema import (
     RunFingerprint,
     RunResult,
@@ -410,7 +410,7 @@ def run_local(
             workspace = task_root / "workspace"
             control_dir = task_root / "control"
             control_dir.mkdir(parents=True)
-            shutil.copytree(task_dir / "workspace", workspace, symlinks=False)
+            copy_fixture_tree(task_dir / "workspace", workspace)
             _inject_artifact(artifact, workspace, artifact_dest, artifact_digest)
             invocation = AgentInvocation(
                 run_id=run_id,

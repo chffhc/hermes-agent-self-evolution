@@ -606,3 +606,28 @@ def test_fake_run_critical_regression_blocks_gate(tmp_path: Path) -> None:
     comparison = compare_runs(suite, baseline, candidate)
     assert comparison.passed_gate is False
     assert comparison.critical_regressions == ("mini-task-0",)
+
+
+def test_fixture_cache_artifacts_never_enter_run_workspace(tmp_path: Path) -> None:
+    suite_path = _mini_suite(tmp_path)
+    cache = suite_path.parent / "tasks/mini-task-0/workspace/__pycache__"
+    cache.mkdir()
+    (cache / "stale.cpython-311.pyc").write_bytes(b"unbound bytes")
+    (suite_path.parent / "tasks/mini-task-0/workspace/.DS_Store").write_bytes(b"finder")
+    suite = load_suite(suite_path)
+    outcome = run_local(
+        suite,
+        invoker=build_fake_agent_invoker(solve=True),
+        run_role="candidate",
+        artifact_path=_artifact(tmp_path),
+        fingerprint=_fingerprint(),
+        budget=BudgetConfig(max_run_usd=0.0),
+        runs_root=tmp_path / "runs",
+        keep_workspaces=True,
+    )
+    assert outcome.result.pass_rate == 1
+    assert outcome.retained_root is not None
+    workspace = outcome.retained_root / "tasks/mini-task-0/workspace"
+    assert (workspace / "seed.txt").is_file()
+    assert not (workspace / "__pycache__").exists()
+    assert not (workspace / ".DS_Store").exists()

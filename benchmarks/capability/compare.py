@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from benchmarks.capability.schema import RunResult, SchemaError
 from benchmarks.capability.suite import CapabilitySuite
@@ -90,7 +91,10 @@ def compare_runs(suite: CapabilitySuite, baseline: RunResult, candidate: RunResu
     cost_delta = None
     if all(value is not None for value in b_costs + c_costs):
         cost_delta = sum(c_costs) - sum(b_costs)  # type: ignore[arg-type]
-    # Milestone-1 conservative gate: no pass-rate regression and no critical regression.
+    # Milestone-1 conservative gate: no pass-rate regression and no critical
+    # regression. Holdout tasks participate fully in the human-review gate and
+    # aggregates; optimizer_feedback derives a development-only view and omits
+    # all holdout outcomes and full-suite metrics.
     passed_gate = not critical_regressions and candidate.pass_rate >= baseline.pass_rate
     return Comparison(
         passed_gate=passed_gate,
@@ -107,3 +111,75 @@ def compare_runs(suite: CapabilitySuite, baseline: RunResult, candidate: RunResu
         cost_delta_usd=cost_delta,
         capability_evidence=False,
     )
+
+
+def optimizer_feedback(suite: CapabilitySuite, comparison: Comparison) -> dict[str, Any]:
+    """Build a development-only view safe for optimizer iteration.
+
+    Holdout outcomes must not become an adaptive oracle: this document omits
+    their identities, outcome counts, full-suite gate, and full-suite metric
+    deltas. The holdout-aware :class:`Comparison` remains human-review data.
+    Fixtures still live in this repository, so this is isolation of the
+    feedback channel rather than fixture secrecy.
+    """
+    if comparison.capability_evidence:
+        raise SchemaError(
+            "optimizer feedback refuses capability_evidence=true comparisons (fail closed)"
+        )
+
+    fields = {
+        "regressions": comparison.regressions,
+        "improvements": comparison.improvements,
+        "critical_regressions": comparison.critical_regressions,
+    }
+    for name, task_ids in fields.items():
+        if len(task_ids) != len(set(task_ids)):
+            raise SchemaError(f"comparison contains duplicate {name} task IDs (fail closed)")
+
+    known = set(suite.task_ids)
+    referenced = set().union(*(set(task_ids) for task_ids in fields.values()))
+    unknown = referenced - known
+    if unknown:
+        raise SchemaError(
+            f"comparison references tasks outside the suite (fail closed): {sorted(unknown)}"
+        )
+    if set(comparison.regressions) & set(comparison.improvements):
+        raise SchemaError("comparison marks a task as both regression and improvement")
+    if not set(comparison.critical_regressions).issubset(comparison.regressions):
+        raise SchemaError("critical regressions must also appear in regressions")
+    expected_critical = {
+        task.task_id
+        for task in suite.tasks
+        if task.critical and task.task_id in comparison.regressions
+    }
+    if set(comparison.critical_regressions) != expected_critical:
+        raise SchemaError("comparison critical regression metadata is inconsistent with the suite")
+
+    development = set(suite.development_task_ids)
+    if not development:
+        raise SchemaError("optimizer feedback requires at least one development task")
+    dev_regressions = sorted(development & set(comparison.regressions))
+    dev_improvements = sorted(development & set(comparison.improvements))
+    dev_critical = sorted(development & set(comparison.critical_regressions))
+    development_pass_rate_delta = (len(dev_improvements) - len(dev_regressions)) / len(development)
+    development_gate_passed = not dev_critical and development_pass_rate_delta >= 0
+
+    return {
+        "feedback_version": 1,
+        "suite_id": suite.suite_id,
+        "capability_evidence": False,
+        "development": {
+            "task_count": len(development),
+            "gate_passed": development_gate_passed,
+            "pass_rate_delta": development_pass_rate_delta,
+            "regressions": dev_regressions,
+            "improvements": dev_improvements,
+            "critical_regressions": dev_critical,
+        },
+        "holdout_outcomes_withheld": True,
+        "note": (
+            "Development-only optimizer feedback. Holdout identities, outcomes, counts, "
+            "full-suite gate, and full-suite metric deltas are withheld for human review. "
+            "Harness comparison only, never live capability evidence."
+        ),
+    }

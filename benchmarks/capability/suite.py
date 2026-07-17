@@ -8,7 +8,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from benchmarks.capability.schema import SchemaError, TaskSpec, canonical_json
+from benchmarks.capability.schema import (
+    SchemaError,
+    TaskSpec,
+    canonical_json,
+    is_ignored_fixture_cache_path,
+)
 from benchmarks.capability.verifiers import VERIFIERS
 
 
@@ -23,6 +28,14 @@ class CapabilitySuite:
     @property
     def task_ids(self) -> tuple[str, ...]:
         return tuple(task.task_id for task in self.tasks)
+
+    @property
+    def development_task_ids(self) -> tuple[str, ...]:
+        return tuple(task.task_id for task in self.tasks if task.split == "development")
+
+    @property
+    def holdout_task_ids(self) -> tuple[str, ...]:
+        return tuple(task.task_id for task in self.tasks if task.split == "holdout")
 
 
 def _require_keys(obj: Any, required: set[str], optional: set[str], ctx: str) -> None:
@@ -57,20 +70,47 @@ def load_suite(path: str | Path) -> CapabilitySuite:
 
     tasks = tuple(TaskSpec.from_dict(item) for item in raw["tasks"])
     seen: set[str] = set()
+    seen_fixtures: set[Path] = set()
+    copied_fixture_roots: list[Path] = []
     root = suite_path.parent
     for task in tasks:
         if task.task_id in seen:
             raise SchemaError(f"suite: duplicate task_id {task.task_id!r}")
         seen.add(task.task_id)
-        task_dir = (root / task.fixture).resolve()
+        fixture_path = root / task.fixture
+        current = root
+        for part in Path(task.fixture).parts:
+            current /= part
+            if current.is_symlink():
+                raise SchemaError(
+                    f"task {task.task_id!r}: symlink fixture path not allowed: {current}"
+                )
+        task_dir = fixture_path.resolve()
         if root != task_dir and root not in task_dir.parents:
             raise SchemaError(f"task {task.task_id!r}: fixture escapes suite root")
+        overlapping = next(
+            (
+                existing
+                for existing in seen_fixtures
+                if existing == task_dir
+                or existing in task_dir.parents
+                or task_dir in existing.parents
+            ),
+            None,
+        )
+        if overlapping is not None:
+            raise SchemaError(
+                f"task {task.task_id!r}: overlapping fixture directory {task.fixture!r}; "
+                "sharing or nesting fixtures across tasks blurs the development/holdout boundary"
+            )
+        seen_fixtures.add(task_dir)
         workspace = task_dir / "workspace"
         if not workspace.is_dir():
             raise SchemaError(f"task {task.task_id!r}: fixture workspace missing: {workspace}")
         replay = task_dir / "replay"
         if not replay.is_dir():
             raise SchemaError(f"task {task.task_id!r}: replay workspace missing: {replay}")
+        copied_fixture_roots.extend((workspace, replay))
         for asset in task_dir.rglob("*"):
             if asset.is_symlink():
                 raise SchemaError(f"task {task.task_id!r}: symlink asset not allowed: {asset}")
@@ -86,15 +126,21 @@ def load_suite(path: str | Path) -> CapabilitySuite:
     # Bind both the logical task document and every fixture/verifier asset.
     digest = hashlib.sha256(canonical_json(raw).encode("utf-8"))
 
+    def is_ignored_copied_asset(path: Path) -> bool:
+        for copied_root in copied_fixture_roots:
+            try:
+                relative = path.relative_to(copied_root)
+            except ValueError:
+                continue
+            return is_ignored_fixture_cache_path(relative)
+        return False
+
     def is_bound_asset(path: Path) -> bool:
-        relative = path.relative_to(root)
-        return (
-            path.is_file()
-            and path != suite_path
-            and "__pycache__" not in relative.parts
-            and path.suffix != ".pyc"
-            and path.name != ".DS_Store"
-        )
+        # Cache/OS entries are excluded only under copied workspace/replay
+        # roots, where copy_fixture_tree applies the same predicate. Assets
+        # used directly by verifiers (for example expected files) stay bound
+        # even if their names look cache-like.
+        return path.is_file() and path != suite_path and not is_ignored_copied_asset(path)
 
     for asset in sorted(p for p in root.rglob("*") if is_bound_asset(p)):
         digest.update(asset.relative_to(root).as_posix().encode("utf-8"))

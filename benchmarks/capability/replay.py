@@ -18,10 +18,33 @@ from benchmarks.capability.schema import (
     RunResult,
     SchemaError,
     TaskResult,
+    is_ignored_fixture_cache_path,
     utc_now_iso,
 )
 from benchmarks.capability.suite import CapabilitySuite
 from benchmarks.capability.verifiers import VERIFIERS
+
+
+def copy_fixture_tree(source: Path, destination: Path, *, overlay: bool = False) -> None:
+    """Copy fixture content, excluding cache/OS artifacts the suite hash ignores.
+
+    The suite hash deliberately skips ``__pycache__``/``*.pyc``/``.DS_Store``
+    (see :func:`benchmarks.capability.suite.load_suite`), so a run workspace
+    must never receive them either: a stray local ``.pyc`` would be bytes the
+    hash never bound, revalidated only by interpreter mtime heuristics that
+    the provenance model must not rely on.
+    """
+
+    def ignore(_directory: str, names: list[str]) -> set[str]:
+        return {name for name in names if is_ignored_fixture_cache_path(Path(name))}
+
+    shutil.copytree(
+        source,
+        destination,
+        symlinks=False,
+        dirs_exist_ok=overlay,
+        ignore=ignore,
+    )
 
 
 def digest_artifact(path: str | Path) -> str:
@@ -72,9 +95,9 @@ def run_replay(
         for task in suite.tasks:
             task_dir = suite.root / task.fixture
             workspace = temp_root / task.task_id
-            shutil.copytree(task_dir / "workspace", workspace, symlinks=False)
+            copy_fixture_tree(task_dir / "workspace", workspace)
             if apply_solution:
-                shutil.copytree(task_dir / "replay", workspace, dirs_exist_ok=True, symlinks=False)
+                copy_fixture_tree(task_dir / "replay", workspace, overlay=True)
             started = time.monotonic()
             details: list[dict[str, object]] = []
             error: str | None = None

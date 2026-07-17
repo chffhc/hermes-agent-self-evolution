@@ -5,11 +5,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 import tempfile
+import unicodedata
 from pathlib import Path
+from typing import Any
 
 from benchmarks.capability.batch_adapter import build_batch_runner_plan
-from benchmarks.capability.compare import compare_runs
+from benchmarks.capability.compare import compare_runs, optimizer_feedback
 from benchmarks.capability.executor import BudgetConfig, build_fake_agent_invoker, run_local
 from benchmarks.capability.hermes_adapter import (
     LiveExecutionApproval,
@@ -23,22 +26,102 @@ from benchmarks.capability.schema import RunFingerprint, SchemaError, load_run_r
 from benchmarks.capability.suite import load_suite
 
 
-def _write_json(path: str | Path, payload: dict[str, object]) -> None:
-    destination = Path(path)
+def _stage_bytes(destination: Path, content: bytes) -> Path:
     destination.parent.mkdir(parents=True, exist_ok=True)
     fd, temp_name = tempfile.mkstemp(
         prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent
     )
+    staged = Path(temp_name)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, indent=2, sort_keys=True, ensure_ascii=False)
-            handle.write("\n")
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temp_name, destination)
+        return staged
     except BaseException:
-        Path(temp_name).unlink(missing_ok=True)
+        staged.unlink(missing_ok=True)
         raise
+
+
+def _json_bytes(payload: dict[str, Any]) -> bytes:
+    return (json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n").encode(
+        "utf-8"
+    )
+
+
+def _reject_symlink_output_path(destination: Path) -> None:
+    """Reject any existing symlink component explicitly traversed by an output path."""
+    if destination.is_absolute():
+        current = Path(destination.anchor)
+        parts = destination.parts[1:]
+    else:
+        current = Path.cwd()
+        parts = destination.parts
+    for part in parts:
+        current /= part
+        if current.is_symlink():
+            raise SchemaError(f"refusing symlink component in JSON output path: {current}")
+
+
+def _output_alias_key(destination: Path) -> str:
+    """Conservatively identify aliases, including case/Unicode-folded macOS paths."""
+    canonical = str(destination.resolve(strict=False))
+    return unicodedata.normalize("NFC", canonical).casefold()
+
+
+def _write_json_transaction(outputs: list[tuple[str | Path, dict[str, Any]]]) -> None:
+    """Replace related JSON outputs as a rollback-safe transaction."""
+    destinations = [Path(path) for path, _payload in outputs]
+    for destination in destinations:
+        _reject_symlink_output_path(destination)
+    aliases = [_output_alias_key(path) for path in destinations]
+    if len(aliases) != len(set(aliases)):
+        raise SchemaError(
+            "transaction output paths must remain distinct under canonical, "
+            "case-insensitive path comparison"
+        )
+
+    previous: dict[Path, bytes | None] = {}
+    staged: dict[Path, Path] = {}
+    replaced: list[Path] = []
+    try:
+        for destination, (_path, payload) in zip(destinations, outputs, strict=True):
+            if destination.is_symlink():
+                raise SchemaError(f"refusing symlink JSON output path: {destination}")
+            previous[destination] = destination.read_bytes() if destination.exists() else None
+            staged[destination] = _stage_bytes(destination, _json_bytes(payload))
+        for destination in destinations:
+            staged_path = staged[destination]
+            os.replace(staged_path, destination)
+            del staged[destination]
+            replaced.append(destination)
+    except BaseException as exc:
+        rollback_errors: list[str] = []
+        for destination in reversed(replaced):
+            try:
+                old_content = previous[destination]
+                if old_content is None:
+                    destination.unlink(missing_ok=True)
+                else:
+                    rollback = _stage_bytes(destination, old_content)
+                    try:
+                        os.replace(rollback, destination)
+                    finally:
+                        rollback.unlink(missing_ok=True)
+            except BaseException as rollback_exc:
+                rollback_errors.append(f"{destination}: {rollback_exc}")
+        for temp_path in staged.values():
+            temp_path.unlink(missing_ok=True)
+        if rollback_errors:
+            raise SchemaError(
+                "JSON output transaction failed and rollback was incomplete: "
+                + "; ".join(rollback_errors)
+            ) from exc
+        raise
+
+
+def _write_json(path: str | Path, payload: dict[str, Any]) -> None:
+    _write_json_transaction([(path, payload)])
 
 
 def _load_config(path: str | None) -> dict[str, object]:
@@ -195,6 +278,14 @@ def build_parser() -> argparse.ArgumentParser:
     compare.add_argument("--baseline", required=True)
     compare.add_argument("--candidate", required=True)
     compare.add_argument("--output")
+    compare.add_argument(
+        "--optimizer-feedback",
+        help=(
+            "write and print the development-only optimizer feedback document: "
+            "holdout identities, outcomes, full-suite gate, and full-suite deltas "
+            "are withheld"
+        ),
+    )
 
     plan = sub.add_parser(
         "plan-batch", help="build a non-executable Hermes batch_runner dry-run plan"
@@ -228,7 +319,15 @@ def main(argv: list[str] | None = None) -> int:
                 _write_json(args.output, payload)
             print(json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False))
             return 0 if readiness.live_ready else 2
-        suite = load_suite(args.suite)
+        try:
+            suite = load_suite(args.suite)
+        except Exception as exc:  # noqa: BLE001 - optimizer boundary must redact backend errors
+            if args.command == "compare" and args.optimizer_feedback:
+                raise SchemaError(
+                    "optimizer feedback unavailable: suite validation failed "
+                    "(holdout-aware details withheld)"
+                ) from exc
+            raise
         if args.command == "validate":
             payload: dict[str, object] = {
                 "valid": True,
@@ -323,12 +422,29 @@ def main(argv: list[str] | None = None) -> int:
             payload = outcome.result.to_dict()
             _write_json(args.output, payload)
         elif args.command == "compare":
-            result = compare_runs(
-                suite, load_run_result(args.baseline), load_run_result(args.candidate)
+            try:
+                result = compare_runs(
+                    suite, load_run_result(args.baseline), load_run_result(args.candidate)
+                )
+            except SchemaError as exc:
+                if args.optimizer_feedback:
+                    raise SchemaError(
+                        "optimizer feedback unavailable: run comparison failed "
+                        "(holdout-aware details withheld)"
+                    ) from exc
+                raise
+            comparison_payload = result.to_dict()
+            feedback_payload = (
+                optimizer_feedback(suite, result) if args.optimizer_feedback else None
             )
-            payload = result.to_dict()
+            outputs: list[tuple[str | Path, dict[str, Any]]] = []
             if args.output:
-                _write_json(args.output, payload)
+                outputs.append((args.output, comparison_payload))
+            if args.optimizer_feedback and feedback_payload is not None:
+                outputs.append((args.optimizer_feedback, feedback_payload))
+            if outputs:
+                _write_json_transaction(outputs)
+            payload = feedback_payload if feedback_payload is not None else comparison_payload
         else:
             payload = build_batch_runner_plan(
                 suite,
@@ -345,7 +461,10 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False))
         return 0
     except SchemaError as exc:
-        print(json.dumps({"error": str(exc), "valid": False}, ensure_ascii=False))
+        print(
+            json.dumps({"error": str(exc), "valid": False}, ensure_ascii=False),
+            file=sys.stderr,
+        )
         return 2
 
 
