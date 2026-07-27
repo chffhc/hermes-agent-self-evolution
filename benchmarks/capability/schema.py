@@ -12,7 +12,9 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
+import stat
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -308,17 +310,140 @@ class UsageReport:
         }
 
 
-def load_usage_report(path: str | Path) -> UsageReport:
-    """Parse a usage-report JSON file, failing closed on any malformation."""
-    report_path = Path(path)
-    if report_path.is_symlink():
-        raise SchemaError(f"usage report must not be a symlink: {report_path}")
-    if not report_path.is_file():
-        raise SchemaError(f"usage report is missing or not a regular file: {report_path}")
+# Ingestion caps: a usage report holds three scalar fields; a run result grows
+# with suite size and verifier details. Both stay far under these bounds, and
+# the bounded read means the cap also bounds harness memory use.
+_MAX_USAGE_REPORT_BYTES = 65_536
+_MAX_RUN_RESULT_BYTES = 10_000_000
+
+
+def _read_bounded_strict_json(path: Path, max_bytes: int, ctx: str) -> Any:
+    """Read one trust-boundary JSON document with fail-closed parsing.
+
+    Bind the read to one regular-file inode, reject symlinks/special files,
+    require two consecutive complete fd reads to agree, reject
+    metadata-visible replacement/change, and cap bytes before strict
+    UTF-8/JSON parsing. Duplicate keys, non-finite constants, and nesting
+    overflow are typed failures rather than ambiguous values or raw
+    exceptions. This captures a checked byte snapshot; it does not prove
+    provenance or that the pathname remains unchanged after return.
+    """
+
+    def _no_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise SchemaError(f"{ctx} {path}: duplicate JSON key {key!r} (fail closed)")
+            result[key] = value
+        return result
+
+    def _no_non_finite(constant: str) -> float:
+        raise SchemaError(f"{ctx} {path}: non-finite JSON constant {constant!r} (fail closed)")
+
+    def _state(info: os.stat_result) -> tuple[int, int, int, int, int]:
+        return (
+            info.st_dev,
+            info.st_ino,
+            info.st_size,
+            info.st_mtime_ns,
+            info.st_ctime_ns,
+        )
+
+    def _read_to_eof(handle) -> bytearray:
+        encoded = bytearray()
+        while len(encoded) <= max_bytes:
+            chunk = handle.read(max_bytes + 1 - len(encoded))
+            if not chunk:
+                break
+            encoded.extend(chunk)
+        return encoded
+
+    def _digest_to_eof(handle) -> tuple[int, bytes]:
+        digest = hashlib.sha256()
+        total = 0
+        while total <= max_bytes:
+            chunk = handle.read(min(64 * 1024, max_bytes + 1 - total))
+            if not chunk:
+                break
+            digest.update(chunk)
+            total += len(chunk)
+        return total, digest.digest()
+
     try:
-        raw = json.loads(report_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as e:
-        raise SchemaError(f"cannot read usage report {report_path}: {e}") from e
+        nonblock = getattr(os, "O_NONBLOCK", 0)
+        if not nonblock and hasattr(os, "mkfifo"):
+            raise SchemaError(
+                f"cannot safely read {ctx}: nonblocking regular-file open is unavailable"
+            )
+        named_before = os.stat(path, follow_symlinks=False)
+        if stat.S_ISLNK(named_before.st_mode):
+            raise SchemaError(f"{ctx} must not be a symlink: {path}")
+        if not stat.S_ISREG(named_before.st_mode):
+            raise SchemaError(f"{ctx} is not a regular file: {path}")
+        if named_before.st_size > max_bytes:
+            raise SchemaError(f"{ctx} {path} exceeds {max_bytes} bytes (fail closed)")
+
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0) | nonblock
+        descriptor = os.open(path, flags)
+        try:
+            handle = os.fdopen(descriptor, "rb")
+        except BaseException:
+            os.close(descriptor)
+            raise
+        with handle:
+            opened_before = os.fstat(handle.fileno())
+            if not stat.S_ISREG(opened_before.st_mode):
+                raise SchemaError(f"{ctx} is not a regular file: {path}")
+            if _state(opened_before) != _state(named_before):
+                raise SchemaError(f"{ctx} changed before it could be read: {path}")
+            if opened_before.st_size > max_bytes:
+                raise SchemaError(f"{ctx} {path} exceeds {max_bytes} bytes (fail closed)")
+            encoded = _read_to_eof(handle)
+            if len(encoded) != opened_before.st_size:
+                raise SchemaError(f"{ctx} changed or was incompletely read: {path}")
+
+            # Metadata is filesystem-dependent, so independently confirm that
+            # a second complete read through the same fd yields identical
+            # bytes. This detects a same-inode rewrite between the reads even
+            # when timestamp reporting is too coarse to expose the change.
+            handle.seek(0)
+            confirmed_size, confirmed_digest = _digest_to_eof(handle)
+            if (
+                confirmed_size != len(encoded)
+                or confirmed_digest != hashlib.sha256(encoded).digest()
+            ):
+                raise SchemaError(f"{ctx} changed while it was being read: {path}")
+            opened_after = os.fstat(handle.fileno())
+
+        if len(encoded) > max_bytes:
+            raise SchemaError(f"{ctx} {path} exceeds {max_bytes} bytes (fail closed)")
+        named_after = os.stat(path, follow_symlinks=False)
+        if (
+            _state(opened_before) != _state(opened_after)
+            or _state(named_after) != _state(opened_after)
+            or not stat.S_ISREG(named_after.st_mode)
+        ):
+            raise SchemaError(f"{ctx} changed while it was being read: {path}")
+
+        return json.loads(
+            encoded.decode("utf-8"),
+            object_pairs_hook=_no_duplicate_keys,
+            parse_constant=_no_non_finite,
+        )
+    except SchemaError:
+        raise
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError) as e:
+        raise SchemaError(f"cannot read {ctx} {path}: {e}") from e
+
+
+def load_usage_report(path: str | Path) -> UsageReport:
+    """Parse a usage-report JSON file, failing closed on any malformation.
+
+    The spend-accounting gate consumes this agent-written document, so the
+    read is bounded and strict: a duplicate ``cost_usd`` key or a
+    multi-gigabyte file is a hard error, never an ambiguity.
+    """
+    raw = _read_bounded_strict_json(Path(path), _MAX_USAGE_REPORT_BYTES, "usage report")
     return UsageReport.from_dict(raw)
 
 
@@ -544,10 +669,12 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def load_run_result(path) -> RunResult:
-    """Parse a run-result JSON file, failing closed on any malformation."""
-    try:
-        raw = json.loads(open(path, encoding="utf-8").read())
-    except (OSError, json.JSONDecodeError) as e:
-        raise SchemaError(f"cannot read run result {path}: {e}") from e
+def load_run_result(path: str | Path) -> RunResult:
+    """Parse a run-result JSON file, failing closed on any malformation.
+
+    Run files feed the human comparison gate and the optimizer-feedback
+    derivation, so they get the same bounded strict-JSON ingestion as suite
+    and feedback documents.
+    """
+    raw = _read_bounded_strict_json(Path(path), _MAX_RUN_RESULT_BYTES, "run result")
     return RunResult.from_dict(raw)

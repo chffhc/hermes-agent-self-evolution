@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
 
+from benchmarks.capability import schema as capability_schema
 from benchmarks.capability.cli import main as cli_main
 from benchmarks.capability.compare import compare_runs
 from benchmarks.capability.executor import (
@@ -21,6 +23,7 @@ from benchmarks.capability.schema import (
     SchemaError,
     UsageReport,
     load_run_result,
+    load_usage_report,
 )
 from benchmarks.capability.suite import load_suite
 
@@ -500,6 +503,293 @@ def test_symlink_usage_report_fails_closed(tmp_path: Path) -> None:
     assert result.results[0].passed is False
     assert result.results[0].error is not None
     assert "must not be a symlink" in result.results[0].error
+
+
+def test_duplicate_key_usage_report_fails_closed_and_halts_run(tmp_path: Path) -> None:
+    """A duplicate cost_usd key must never be silently resolved last-wins:
+    a human auditing control/usage.json could read the first value while the
+    accounting gate charges the second."""
+
+    class DuplicateKeyUsageInvoker:
+        execution_mode = "fake_agent"
+
+        def invoke(self, invocation):
+            invocation.usage_file.write_text(
+                '{"cost_usd": 9.99, "input_tokens": 1, "output_tokens": 1, "cost_usd": 0.0}',
+                encoding="utf-8",
+            )
+            from benchmarks.capability.executor import InvocationOutcome
+
+            return InvocationOutcome(exit_code=0, timed_out=False)
+
+    result = run_local(
+        load_suite(_mini_suite(tmp_path, task_count=2)),
+        invoker=DuplicateKeyUsageInvoker(),
+        run_role="baseline",
+        artifact_path=_artifact(tmp_path),
+        fingerprint=_fingerprint(),
+        budget=BudgetConfig(max_run_usd=10.0),
+        runs_root=tmp_path / "runs",
+    ).result
+    first, second = result.results
+    assert first.passed is False and first.cost_usd is None
+    assert first.error is not None and "duplicate JSON key 'cost_usd'" in first.error
+    assert "usage report invalid or missing" in first.error
+    assert second.passed is False
+    assert second.error is not None and "not executed" in second.error
+
+
+def test_usage_report_ingestion_is_bounded_and_strict(tmp_path: Path) -> None:
+    usage = tmp_path / "usage.json"
+
+    usage.write_text('{"cost_usd": Infinity, "input_tokens": 1, "output_tokens": 1}')
+    with pytest.raises(SchemaError, match="non-finite JSON constant"):
+        load_usage_report(usage)
+
+    usage.write_text("[" * 2000 + "0" + "]" * 2000)
+    with pytest.raises(SchemaError, match="cannot read usage report"):
+        load_usage_report(usage)
+
+    usage.write_bytes(b" " * 65_537)
+    with pytest.raises(SchemaError, match="exceeds 65536 bytes"):
+        load_usage_report(usage)
+
+
+def test_run_result_duplicate_keys_are_rejected_not_last_wins(tmp_path: Path) -> None:
+    """A run file whose first run_role a reviewer reads differs from the one
+    the parser keeps is a tampered document, not a valid run."""
+    outcome = run_local(
+        load_suite(_mini_suite(tmp_path)),
+        invoker=build_fake_agent_invoker(solve=True),
+        run_role="baseline",
+        artifact_path=_artifact(tmp_path),
+        fingerprint=_fingerprint(),
+        budget=BudgetConfig(max_run_usd=0.0),
+        runs_root=tmp_path / "runs",
+    )
+    text = json.dumps(outcome.result.to_dict())
+    assert text.count('"run_role": "baseline"') == 1
+    smuggled = text.replace(
+        '"run_role": "baseline"', '"run_role": "candidate", "run_role": "baseline"'
+    )
+    run_file = tmp_path / "run.json"
+    run_file.write_text(smuggled, encoding="utf-8")
+    with pytest.raises(SchemaError, match="duplicate JSON key 'run_role'"):
+        load_run_result(run_file)
+
+
+def test_run_result_ingestion_is_bounded_and_types_deep_json_errors(tmp_path: Path) -> None:
+    run_file = tmp_path / "run.json"
+
+    run_file.write_text("[" * 2000 + "0" + "]" * 2000)
+    with pytest.raises(SchemaError, match="cannot read run result"):
+        load_run_result(run_file)
+
+    run_file.write_bytes(b" " * 10_000_001)
+    with pytest.raises(SchemaError, match="exceeds 10000000 bytes"):
+        load_run_result(run_file)
+
+
+def test_trust_boundary_json_rejects_symlinks_and_special_files(tmp_path: Path) -> None:
+    target = tmp_path / "target.json"
+    target.write_text("{}", encoding="utf-8")
+    link = tmp_path / "run.json"
+    link.symlink_to(target)
+    with pytest.raises(SchemaError, match="run result must not be a symlink"):
+        load_run_result(link)
+
+    fifo = tmp_path / "usage.json"
+    os.mkfifo(fifo)
+    with pytest.raises(SchemaError, match="usage report is not a regular file"):
+        load_usage_report(fifo)
+
+
+def test_run_result_rejects_path_replacement_between_stat_and_open(
+    tmp_path: Path, monkeypatch
+) -> None:
+    run_file = tmp_path / "run.json"
+    run_file.write_text("{}", encoding="utf-8")
+    replacement = tmp_path / "replacement.json"
+    replacement.write_text('{"replacement": true}', encoding="utf-8")
+    original = tmp_path / "original.json"
+    real_open = capability_schema.os.open
+    replaced = False
+
+    def replacing_open(path, flags, *args, **kwargs):
+        nonlocal replaced
+        if Path(path) == run_file and not replaced:
+            run_file.replace(original)
+            replacement.replace(run_file)
+            replaced = True
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(capability_schema.os, "open", replacing_open)
+    with pytest.raises(SchemaError, match="changed before it could be read"):
+        load_run_result(run_file)
+    assert replaced and original.read_text(encoding="utf-8") == "{}"
+
+
+def test_usage_report_rejects_same_inode_mutation_during_read(tmp_path: Path, monkeypatch) -> None:
+    usage = tmp_path / "usage.json"
+    usage.write_text('{"cost_usd": 0, "input_tokens": 1, "output_tokens": 1}')
+    real_fstat = capability_schema.os.fstat
+    calls = 0
+
+    def mutating_fstat(descriptor):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            usage.write_text(
+                '{"cost_usd": 9, "input_tokens": 1, "output_tokens": 1}',
+                encoding="utf-8",
+            )
+        return real_fstat(descriptor)
+
+    monkeypatch.setattr(capability_schema.os, "fstat", mutating_fstat)
+    with pytest.raises(SchemaError, match="changed while it was being read"):
+        load_usage_report(usage)
+
+
+def test_trust_boundary_json_loops_past_short_reads(tmp_path: Path, monkeypatch) -> None:
+    run_file = tmp_path / "run.json"
+    run_file.write_bytes(b"{}TRAILING")
+    real_fdopen = capability_schema.os.fdopen
+
+    class ShortRead:
+        def __init__(self, handle):
+            self.handle = handle
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return self.handle.__exit__(*args)
+
+        def fileno(self):
+            return self.handle.fileno()
+
+        def read(self, size):
+            return self.handle.read(min(size, 2))
+
+        def seek(self, offset):
+            return self.handle.seek(offset)
+
+    monkeypatch.setattr(
+        capability_schema.os,
+        "fdopen",
+        lambda descriptor, *args, **kwargs: ShortRead(real_fdopen(descriptor, *args, **kwargs)),
+    )
+    with pytest.raises(SchemaError, match="cannot read run result"):
+        load_run_result(run_file)
+
+
+def test_fdopen_failure_closes_untransferred_descriptor(tmp_path: Path, monkeypatch) -> None:
+    usage = tmp_path / "usage.json"
+    usage.write_text('{"cost_usd": 0, "input_tokens": 1, "output_tokens": 1}')
+    descriptors: list[int] = []
+
+    def failing_fdopen(descriptor, *args, **kwargs):
+        descriptors.append(descriptor)
+        raise OSError("injected fdopen failure")
+
+    monkeypatch.setattr(capability_schema.os, "fdopen", failing_fdopen)
+    with pytest.raises(SchemaError, match="cannot read usage report"):
+        load_usage_report(usage)
+    assert descriptors
+    for descriptor in descriptors:
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
+
+
+def test_missing_nonblocking_open_capability_fails_closed(tmp_path: Path, monkeypatch) -> None:
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("platform has no filesystem FIFO race")
+    usage = tmp_path / "usage.json"
+    usage.write_text('{"cost_usd": 0, "input_tokens": 1, "output_tokens": 1}')
+    monkeypatch.setattr(capability_schema.os, "O_NONBLOCK", 0)
+    with pytest.raises(SchemaError, match="nonblocking regular-file open is unavailable"):
+        load_usage_report(usage)
+
+
+def test_double_read_detects_rewrite_when_metadata_appears_stable(
+    tmp_path: Path, monkeypatch
+) -> None:
+    usage = tmp_path / "usage.json"
+    usage.write_text('{"cost_usd": 0, "input_tokens": 1, "output_tokens": 1}')
+    stable = os.stat(usage)
+    real_fdopen = capability_schema.os.fdopen
+    mutated = False
+
+    class MutatingRead:
+        def __init__(self, handle):
+            self.handle = handle
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return self.handle.__exit__(*args)
+
+        def fileno(self):
+            return self.handle.fileno()
+
+        def read(self, size):
+            nonlocal mutated
+            data = self.handle.read(size)
+            if data and not mutated:
+                usage.write_text(
+                    '{"cost_usd": 9, "input_tokens": 1, "output_tokens": 1}',
+                    encoding="utf-8",
+                )
+                mutated = True
+            return data
+
+        def seek(self, offset):
+            return self.handle.seek(offset)
+
+    monkeypatch.setattr(
+        capability_schema.os,
+        "fdopen",
+        lambda descriptor, *args, **kwargs: MutatingRead(real_fdopen(descriptor, *args, **kwargs)),
+    )
+    monkeypatch.setattr(capability_schema.os, "fstat", lambda descriptor: stable)
+    monkeypatch.setattr(capability_schema.os, "stat", lambda *args, **kwargs: stable)
+    with pytest.raises(SchemaError, match="changed while it was being read"):
+        load_usage_report(usage)
+    assert mutated
+
+
+def test_compare_cli_keeps_stable_error_contract_on_pathological_run_json(
+    tmp_path: Path, capsys
+) -> None:
+    """Nesting overflow in a run file must produce the one-line CLI error —
+    and, in optimizer-feedback mode, only the holdout-safe diagnostic — not
+    an uncaught RecursionError traceback."""
+    bad = tmp_path / "baseline.json"
+    bad.write_text("[" * 2000 + "0" + "]" * 2000)
+    candidate = tmp_path / "candidate.json"
+    candidate.write_text("{}")
+    feedback = tmp_path / "feedback.json"
+    rc = cli_main(
+        [
+            "compare",
+            "--suite",
+            str(SUITE_PATH),
+            "--baseline",
+            str(bad),
+            "--candidate",
+            str(candidate),
+            "--optimizer-feedback",
+            str(feedback),
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert captured.out == ""
+    error = json.loads(captured.err)
+    assert error["valid"] is False
+    assert "holdout-aware details withheld" in error["error"]
+    assert not feedback.exists()
 
 
 def test_invoker_exception_records_failure_and_cleans_up(tmp_path: Path) -> None:
