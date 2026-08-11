@@ -197,7 +197,7 @@ def _reject_forbidden_key_names(keys: set[str], ctx: str) -> None:
     )
     if flagged:
         _fail(
-            f"{ctx} contains holdout/comparison-shaped fields {flagged}; "
+            f"{ctx} contains holdout/comparison-shaped fields; "
             "holdout identities, outcomes, and counts must never reach the optimizer"
         )
 
@@ -207,17 +207,17 @@ def _require_exact_keys(obj: dict, expected: frozenset, ctx: str) -> None:
     _reject_forbidden_key_names(keys, ctx)
     missing = sorted(expected - keys)
     if missing:
-        _fail(f"{ctx} is missing required fields {missing}")
+        _fail(f"{ctx} is missing required fields")
     unknown = sorted(keys - expected)
     if unknown:
-        _fail(f"{ctx} contains unknown fields {unknown}")
+        _fail(f"{ctx} contains unknown fields")
 
 
 def _require_slug(value: object, ctx: str) -> str:
     if not isinstance(value, str):
         _fail(f"{ctx} must be a string, got {type(value).__name__}")
     if len(value) > 128 or not _SLUG_RE.match(value):
-        _fail(f"{ctx} must be a short slug matching {_SLUG_RE.pattern}, got {value!r}")
+        _fail(f"{ctx} must be a short slug matching {_SLUG_RE.pattern}")
     return value
 
 
@@ -315,7 +315,7 @@ def parse_optimizer_feedback(
     comparison_markers = sorted(set(document) & _COMPARISON_ONLY_TOP_LEVEL_KEYS)
     if comparison_markers:
         _fail(
-            f"document carries full-comparison fields {comparison_markers}; the optimizer "
+            "document carries full-comparison fields; the optimizer "
             "must consume only the development-only optimizer_feedback document, never "
             "Comparison.to_dict() output"
         )
@@ -327,7 +327,7 @@ def parse_optimizer_feedback(
 
     suite_id = _require_slug(document["suite_id"], "suite_id")
     if suite_id != suite_id_policy:
-        _fail(f"suite_id {suite_id!r} does not match the trusted suite {suite_id_policy!r}")
+        _fail("suite_id does not match the trusted suite")
     suite_hash = _require_sha256(document["suite_hash"], "suite_hash")
     if suite_hash != suite_hash_policy:
         _fail("suite_hash does not match the trusted suite definition")
@@ -353,7 +353,7 @@ def parse_optimizer_feedback(
     )
     foreign = sorted(referenced - known_task_ids)
     if foreign:
-        _fail(f"document references task IDs outside the trusted development suite: {foreign}")
+        _fail("document references task IDs outside the trusted development suite")
 
     expected_critical = set(development.regressions) & known_critical_task_ids
     if set(development.critical_regressions) != expected_critical:
@@ -381,16 +381,16 @@ def load_optimizer_feedback(
         raw = encoded.decode("utf-8")
     except CapabilityFeedbackError:
         raise
-    except (OSError, UnicodeDecodeError) as exc:
+    except (OSError, UnicodeDecodeError):
         raise CapabilityFeedbackError(
-            f"optimizer feedback rejected: cannot read feedback file: {exc} (fail closed)"
-        ) from exc
+            "optimizer feedback rejected: feedback file could not be read (fail closed)"
+        ) from None
 
     def _no_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
         result: dict[str, object] = {}
         for key, value in pairs:
             if key in result:
-                _fail(f"duplicate JSON key {key!r}")
+                _fail("duplicate JSON key")
             result[key] = value
         return result
 

@@ -100,28 +100,32 @@ def evolve(
             "--capability-suite must be supplied together (fail closed)"
         )
     if capability_feedback is not None and capability_suite is not None:
+        trusted_suite = None
         try:
             trusted_suite = load_capability_suite(capability_suite)
-        except Exception as exc:  # noqa: BLE001 - convert suite backend failures to typed errors
+        except Exception:  # noqa: BLE001 - convert suite backend failures to typed errors
             raise CapabilityFeedbackError(
                 "optimizer feedback rejected: trusted capability suite could not be "
                 "loaded and validated (fail closed)"
-            ) from exc
-        development_ids = frozenset(trusted_suite.development_task_ids)
-        critical_development_ids = frozenset(
-            task.task_id
-            for task in trusted_suite.tasks
-            if task.split == "development" and task.critical
-        )
-        capability_context = load_optimizer_feedback(
-            capability_feedback,
-            policy=CapabilityFeedbackPolicy(
-                suite_id=trusted_suite.suite_id,
-                suite_hash=trusted_suite.suite_hash,
-                development_task_ids=development_ids,
-                critical_development_task_ids=critical_development_ids,
-            ),
-        )
+            ) from None
+        try:
+            development_ids = frozenset(trusted_suite.development_task_ids)
+            critical_development_ids = frozenset(
+                task.task_id
+                for task in trusted_suite.tasks
+                if task.split == "development" and task.critical
+            )
+            capability_context = load_optimizer_feedback(
+                capability_feedback,
+                policy=CapabilityFeedbackPolicy(
+                    suite_id=trusted_suite.suite_id,
+                    suite_hash=trusted_suite.suite_hash,
+                    development_task_ids=development_ids,
+                    critical_development_task_ids=critical_development_ids,
+                ),
+            )
+        finally:
+            trusted_suite.close()
     capability_document = (
         capability_context.to_document() if capability_context is not None else None
     )

@@ -317,33 +317,22 @@ _MAX_USAGE_REPORT_BYTES = 65_536
 _MAX_RUN_RESULT_BYTES = 10_000_000
 
 
-def _read_bounded_strict_json(path: Path, max_bytes: int, ctx: str) -> Any:
-    """Read one trust-boundary JSON document with fail-closed parsing.
+def _read_stable_snapshot(path: Path, max_bytes: int, ctx: str) -> bytes:
+    """Capture a bounded byte snapshot of one trust-boundary file.
 
     Bind the read to one regular-file inode, reject symlinks/special files,
     require two consecutive complete fd reads to agree, reject
-    metadata-visible replacement/change, and cap bytes before strict
-    UTF-8/JSON parsing. Duplicate keys, non-finite constants, and nesting
-    overflow are typed failures rather than ambiguous values or raw
-    exceptions. This captures a checked byte snapshot; it does not prove
-    provenance or that the pathname remains unchanged after return.
+    metadata-visible replacement/change, and cap the captured bytes. This
+    captures a checked byte snapshot; it does not prove provenance or that
+    the pathname remains unchanged after return, and any symlink in a
+    non-final path component is still resolved by the OS.
     """
 
-    def _no_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-        result: dict[str, Any] = {}
-        for key, value in pairs:
-            if key in result:
-                raise SchemaError(f"{ctx} {path}: duplicate JSON key {key!r} (fail closed)")
-            result[key] = value
-        return result
-
-    def _no_non_finite(constant: str) -> float:
-        raise SchemaError(f"{ctx} {path}: non-finite JSON constant {constant!r} (fail closed)")
-
-    def _state(info: os.stat_result) -> tuple[int, int, int, int, int]:
+    def _state(info: os.stat_result) -> tuple[int, int, int, int, int, int]:
         return (
             info.st_dev,
             info.st_ino,
+            info.st_mode,
             info.st_size,
             info.st_mtime_ns,
             info.st_ctime_ns,
@@ -425,6 +414,35 @@ def _read_bounded_strict_json(path: Path, max_bytes: int, ctx: str) -> Any:
         ):
             raise SchemaError(f"{ctx} changed while it was being read: {path}")
 
+        return bytes(encoded)
+    except SchemaError:
+        raise
+    except (OSError, ValueError) as e:
+        raise SchemaError(f"cannot read {ctx} {path}: {e}") from e
+
+
+def _read_bounded_strict_json(path: Path, max_bytes: int, ctx: str) -> Any:
+    """Read one trust-boundary JSON document with fail-closed parsing.
+
+    The snapshot phase (:func:`_read_stable_snapshot`) rejects
+    symlinks/special files and mid-read change; the parse phase turns
+    duplicate keys, non-finite constants, and nesting overflow into typed
+    failures rather than ambiguous values or raw exceptions.
+    """
+
+    def _no_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise SchemaError(f"{ctx} {path}: duplicate JSON key {key!r} (fail closed)")
+            result[key] = value
+        return result
+
+    def _no_non_finite(constant: str) -> float:
+        raise SchemaError(f"{ctx} {path}: non-finite JSON constant {constant!r} (fail closed)")
+
+    encoded = _read_stable_snapshot(path, max_bytes, ctx)
+    try:
         return json.loads(
             encoded.decode("utf-8"),
             object_pairs_hook=_no_duplicate_keys,
@@ -432,7 +450,7 @@ def _read_bounded_strict_json(path: Path, max_bytes: int, ctx: str) -> Any:
         )
     except SchemaError:
         raise
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError) as e:
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError) as e:
         raise SchemaError(f"cannot read {ctx} {path}: {e}") from e
 
 

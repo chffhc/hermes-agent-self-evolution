@@ -304,6 +304,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    suite = None
     try:
         if args.command == "probe-hermes":
             report = probe_hermes_checkout(args.hermes_repo)
@@ -466,6 +467,9 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+    finally:
+        if suite is not None:
+            suite.close()
 
 
 if __name__ == "__main__":

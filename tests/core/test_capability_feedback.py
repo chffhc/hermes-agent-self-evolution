@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import copy
 import json
+import traceback
 from pathlib import Path
 
 import pytest
@@ -433,6 +434,28 @@ def test_rejects_foreign_task_ids_and_wrong_suite() -> None:
         parse_optimizer_feedback(document, expected_suite_id="different-suite")
 
 
+def test_rejection_messages_do_not_echo_untrusted_identifiers() -> None:
+    holdout_id = "dedupe-visitor-log"
+
+    document = _valid_document()
+    document["development"]["improvements"] = [holdout_id]
+    with pytest.raises(CapabilityFeedbackError) as foreign_error:
+        parse_optimizer_feedback(document)
+    assert holdout_id not in str(foreign_error.value)
+
+    document = _valid_document()
+    document["suite_id"] = holdout_id
+    with pytest.raises(CapabilityFeedbackError) as suite_error:
+        parse_optimizer_feedback(document)
+    assert holdout_id not in str(suite_error.value)
+
+    document = _valid_document()
+    document[holdout_id] = True
+    with pytest.raises(CapabilityFeedbackError) as field_error:
+        parse_optimizer_feedback(document)
+    assert holdout_id not in str(field_error.value)
+
+
 def test_rejects_stale_suite_hash_and_unbound_task_count() -> None:
     document = _valid_document()
     document["suite_hash"] = "b" * 64
@@ -509,8 +532,50 @@ def test_loader_rejects_invalid_json_and_wrong_roots(tmp_path: Path) -> None:
     path.write_text("[1, 2, 3]")
     with pytest.raises(CapabilityFeedbackError, match="JSON object"):
         load_optimizer_feedback(path)
-    with pytest.raises(CapabilityFeedbackError, match="cannot read"):
+    with pytest.raises(CapabilityFeedbackError, match="could not be read"):
         load_optimizer_feedback(tmp_path / "missing.json")
+
+
+def test_loader_read_error_does_not_echo_untrusted_path(tmp_path: Path) -> None:
+    holdout_id = "dedupe-visitor-log"
+    missing = tmp_path / holdout_id / "secret-feedback.json"
+    with pytest.raises(CapabilityFeedbackError) as error:
+        load_optimizer_feedback(missing)
+    message = str(error.value)
+    assert holdout_id not in message
+    assert str(missing) not in message
+    assert "feedback file could not be read" in message
+    rendered = "".join(traceback.format_exception(error.type, error.value, error.tb))
+    assert holdout_id not in rendered
+    assert str(missing) not in rendered
+
+
+def test_suite_load_error_traceback_does_not_echo_holdout_details(tmp_path: Path) -> None:
+    from evolution.skills.evolve_skill import evolve
+
+    holdout_id = "migrate-settings-schema"
+    secret_fixture = "tasks/private-holdout-fixture"
+    suite_root = tmp_path / "suite"
+    suite_root.mkdir()
+    suite_path = suite_root / "suite.json"
+    document = json.loads(SUITE_PATH.read_text(encoding="utf-8"))
+    holdout_task = next(task for task in document["tasks"] if task["task_id"] == holdout_id)
+    holdout_task["fixture"] = secret_fixture
+    suite_path.write_text(json.dumps(document), encoding="utf-8")
+    feedback_path = tmp_path / holdout_id / "feedback.json"
+
+    with pytest.raises(CapabilityFeedbackError) as error:
+        evolve(
+            skill_name="demo",
+            capability_feedback=feedback_path,
+            capability_suite=suite_path,
+        )
+
+    rendered = "".join(traceback.format_exception(error.type, error.value, error.tb))
+    assert "trusted capability suite could not be loaded" in rendered
+    assert holdout_id not in rendered
+    assert secret_fixture not in rendered
+    assert str(suite_path) not in rendered
 
 
 def test_loader_rejects_oversized_documents(tmp_path: Path) -> None:
@@ -633,6 +698,45 @@ def test_evolve_rejects_feedback_before_any_other_work(tmp_path, monkeypatch) ->
         )
 
 
+def test_evolve_closes_trusted_suite_when_feedback_validation_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import evolution.skills.evolve_skill as evolve_skill_module
+
+    loaded = load_suite(SUITE_PATH)
+
+    class TrackingSuite:
+        closed = False
+
+        def __getattr__(self, name: str):
+            return getattr(loaded, name)
+
+        def close(self) -> None:
+            self.closed = True
+            loaded.close()
+
+    tracking = TrackingSuite()
+    feedback_path = tmp_path / "feedback.json"
+    feedback_path.write_text(json.dumps(_valid_document()))
+    monkeypatch.setattr(evolve_skill_module, "load_capability_suite", lambda _path: tracking)
+    monkeypatch.setattr(
+        evolve_skill_module,
+        "load_optimizer_feedback",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            CapabilityFeedbackError("simulated feedback rejection")
+        ),
+    )
+
+    with pytest.raises(CapabilityFeedbackError, match="simulated feedback rejection"):
+        evolve_skill_module.evolve(
+            skill_name="demo",
+            capability_feedback=feedback_path,
+            capability_suite=SUITE_PATH,
+        )
+
+    assert tracking.closed is True
+
+
 def test_evolve_requires_feedback_and_suite_together(tmp_path: Path) -> None:
     from evolution.skills.evolve_skill import evolve
 
@@ -707,6 +811,36 @@ def test_deep_json_is_typed_and_both_clis_fail_closed(tmp_path: Path) -> None:
     assert run_result.exit_code == 1
     assert "invalid strict JSON document" in run_result.output
     assert not isinstance(run_result.exception, RecursionError)
+
+
+def test_both_clis_do_not_echo_holdout_id_or_feedback_path(tmp_path: Path) -> None:
+    import run_evolution
+    from evolution.skills.evolve_skill import main as evolve_main
+
+    suite, _comparison, document = _real_feedback_and_suite()
+    holdout_id = suite.holdout_task_ids[0]
+    document["development"]["improvements"] = [holdout_id]
+    document["development"]["pass_rate_delta"] = 1 / 3
+    secret_dir = tmp_path / holdout_id
+    secret_dir.mkdir()
+    feedback_path = secret_dir / "feedback.json"
+    feedback_path.write_text(json.dumps(document), encoding="utf-8")
+    args = [
+        "--skill",
+        "demo",
+        "--capability-feedback",
+        str(feedback_path),
+        "--capability-suite",
+        str(SUITE_PATH),
+    ]
+
+    for cli in (evolve_main, run_evolution.main):
+        result = CliRunner().invoke(cli, args)
+        assert result.exit_code == 1
+        normalized_output = " ".join(result.output.split())
+        assert "outside the trusted development suite" in normalized_output
+        assert holdout_id not in result.output
+        assert str(feedback_path) not in result.output
 
 
 def test_failed_metrics_persist_validated_feedback(tmp_path: Path) -> None:
