@@ -244,6 +244,13 @@ def _terminate_process_group(process: subprocess.Popen[str]) -> None:
             pass
 
 
+# Process-table scan the detached-descendant sweep depends on. Exposed as a
+# constant so tests can probe the exact mechanism and skip where the
+# environment denies it (e.g. sandboxes that forbid process introspection).
+# The sweep remains best-effort: hermeticity is not claimed.
+_PROCESS_TABLE_SCAN_ARGV: tuple[str, ...] = ("ps", "eww", "-axo", "pid=,command=")
+
+
 def _token_process_ids(token: str) -> set[int]:
     """Find same-user POSIX processes that still inherit this private build token."""
     if os.name != "posix":
@@ -251,7 +258,7 @@ def _token_process_ids(token: str) -> set[int]:
     marker = f"HERMES_WHEEL_BUILD_PROCESS_TOKEN={token}"
     try:
         completed = subprocess.run(
-            ["ps", "eww", "-axo", "pid=,command="],
+            list(_PROCESS_TABLE_SCAN_ARGV),
             capture_output=True,
             text=True,
             timeout=2,

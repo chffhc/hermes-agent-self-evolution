@@ -449,6 +449,32 @@ def test_publish_rolls_back_if_directory_is_replaced_during_cleanup(
     assert not (moved_dir / source.name).exists()
 
 
+def _process_table_scan_denied() -> str | None:
+    """Skip reason when the environment forbids the sweep's process-table scan.
+
+    ``build_wheel._token_process_ids`` discovers detached token-bearing
+    descendants with ``ps eww -axo pid=,command=``. When the environment denies
+    that exact scan (sandboxes that forbid process introspection), the sweep
+    cannot be exercised and the kill invariant is unverifiable locally;
+    unrestricted CI still runs this test in full.
+    """
+    try:
+        subprocess.run(
+            list(build_wheel._PROCESS_TABLE_SCAN_ARGV),
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return (
+            "environment denies the process-table scan used by the "
+            f"detached-descendant sweep ({exc}); the kill invariant is exercised "
+            "on unrestricted CI"
+        )
+    return None
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process-group cleanup probe")
 def test_process_timeout_kills_same_group_descendant(tmp_path: Path) -> None:
     pid_file = tmp_path / "child.pid"
@@ -475,12 +501,18 @@ def test_process_timeout_kills_same_group_descendant(tmp_path: Path) -> None:
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX detached-descendant cleanup probe")
 def test_process_timeout_kills_detached_descendant(tmp_path: Path) -> None:
+    denial = _process_table_scan_denied()
+    if denial:
+        pytest.skip(denial)
     pid_file = tmp_path / "detached.pid"
     marker = tmp_path / "late-write.txt"
+    # The child must outlive the whole check window: if the sweep failed, the
+    # liveness check below — not the marker assertion — is what reports it.
     child_code = (
         "import pathlib,sys,time; "
         "pathlib.Path(sys.argv[1]).write_text(str(__import__('os').getpid())); "
-        "time.sleep(0.8); pathlib.Path(sys.argv[2]).write_text('escaped')"
+        "time.sleep(3.0); pathlib.Path(sys.argv[2]).write_text('escaped'); "
+        "time.sleep(25)"
     )
     parent_code = (
         "import subprocess,sys,time; "
@@ -564,8 +596,7 @@ def test_direct_script_reports_missing_declared_packaging_dependency() -> None:
     assert completed.returncode == 1
     assert completed.stdout == ""
     assert completed.stderr == (
-        "error: missing required dependency 'packaging>=23'; "
-        "install project dependencies first\n"
+        "error: missing required dependency 'packaging>=23'; install project dependencies first\n"
     )
 
 
